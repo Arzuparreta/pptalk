@@ -1,0 +1,20 @@
+[Unit]
+Description=pptalk optional encrypted mailbox node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pptalk
+Group=pptalk
+ExecStart=/usr/bin/pptalk-node --listen 127.0.0.1:9464 --data-dir /var/lib/pptalk-node
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pptalk-node
+
+[Install]
+WantedBy=multi-user.target

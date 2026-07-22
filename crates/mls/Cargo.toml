@@ -1,0 +1,20 @@
+[package]
+name = "pptalk-mls"
+description = "RFC 9420 group key schedule and membership epochs for pptalk"
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+ciborium.workspace = true
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tls_codec.workspace = true
+
+[lints]
+workspace = true

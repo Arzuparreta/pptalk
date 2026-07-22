@@ -1,0 +1,28 @@
+[package]
+name = "pptalk-node"
+description = "Optional self-hosted relay, rendezvous and mailbox for pptalk"
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+clap.workspace = true
+hex.workspace = true
+pptalk-network = { path = "../../crates/network" }
+pptalk-protocol = { path = "../../crates/protocol" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev zstd
+      - run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: build/*.tar.zst
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+      - name: Install GStreamer 1.28 SDK
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/1.28.5/msvc/gstreamer-1.0-msvc-x86_64-1.28.5.exe" -OutFile "$env:RUNNER_TEMP\gstreamer.exe"
+          Start-Process -Wait -FilePath "$env:RUNNER_TEMP\gstreamer.exe" -ArgumentList '/VERYSILENT','/NORESTART','/CURRENTUSER','/TYPE=devel','/DIR=C:\gstreamer'
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "C:\gstreamer\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+      - shell: pwsh
+        run: ./scripts/package-windows.ps1 -Version $env:GITHUB_REF_NAME
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: build/*.zip
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

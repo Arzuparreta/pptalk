@@ -1,0 +1,20 @@
+[package]
+name = "pptalk-media"
+description = "Capability-driven media engine for pptalk"
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+pptalk-protocol = { path = "../protocol" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

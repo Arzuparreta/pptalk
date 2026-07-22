@@ -1,0 +1,13 @@
+pptalk licensing
+==================
+
+The desktop client, CLI and shared crates are licensed under the GNU General
+Public License, version 3 or any later version. See
+LICENSES/GPL-3.0-or-later.txt.
+
+The optional network service under apps/node is licensed under the GNU Affero
+General Public License, version 3 or any later version. See
+LICENSES/AGPL-3.0-or-later.txt.
+
+Unless a file states otherwise, documentation and packaging files follow the
+GPL-3.0-or-later license.

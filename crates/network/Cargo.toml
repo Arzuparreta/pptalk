@@ -1,0 +1,27 @@
+[package]
+name = "pptalk-network"
+description = "Authenticated Iroh transport for pptalk"
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+iroh.workspace = true
+pptalk-protocol = { path = "../protocol" }
+serde.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pptalk-core = { path = "../core" }
+pptalk-storage = { path = "../storage" }
+rand.workspace = true
+
+[lints]
+workspace = true
