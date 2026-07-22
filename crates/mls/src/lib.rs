@@ -6,10 +6,15 @@ use ::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{MapAccess, SeqAccess, Visitor},
+};
 use thiserror::Error;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+const SNAPSHOT_VERSION: u16 = 1;
+type StorageValues = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// Owns one device's MLS credential, key store and active group states.
 pub struct MlsClient {
@@ -259,6 +264,7 @@ impl MlsClient {
             .read()
             .map_err(|_| MlsError::Poisoned)?;
         let snapshot = MlsSnapshot {
+            version: SNAPSHOT_VERSION,
             values: values
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -278,7 +284,10 @@ impl MlsClient {
     }
 
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, MlsError> {
-        let snapshot: MlsSnapshot = ciborium::from_reader(bytes).map_err(operation)?;
+        let snapshot = decode_snapshot(bytes)?;
+        if snapshot.version > SNAPSHOT_VERSION {
+            return Err(MlsError::UnsupportedSnapshotVersion(snapshot.version));
+        }
         let provider = OpenMlsRustCrypto::default();
         {
             let mut values = provider
@@ -315,13 +324,126 @@ impl MlsClient {
     }
 }
 
+fn decode_snapshot(bytes: &[u8]) -> Result<MlsSnapshot, MlsError> {
+    match ciborium::from_reader(bytes) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(current_error) => {
+            let legacy: LegacyCredentialSnapshot =
+                ciborium::from_reader(bytes).map_err(|legacy_error| {
+                    MlsError::Operation(format!(
+                        "cannot decode current ({current_error:?}) or legacy ({legacy_error:?}) MLS snapshot"
+                    ))
+                })?;
+            if !legacy
+                .credential
+                .credential
+                .credential_type
+                .eq_ignore_ascii_case("basic")
+            {
+                return Err(MlsError::UnsupportedLegacyCredential(
+                    legacy.credential.credential.credential_type,
+                ));
+            }
+            let credential: Credential = BasicCredential::new(
+                legacy
+                    .credential
+                    .credential
+                    .serialized_credential_content
+                    .vec,
+            )
+            .into();
+            Ok(MlsSnapshot {
+                version: 0,
+                values: legacy.values,
+                signer_public: legacy.signer_public,
+                credential: credential.tls_serialize_detached().map_err(operation)?,
+                credential_signature_key: legacy.credential.signature_key.value.vec,
+                group_ids: legacy.group_ids,
+            })
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct MlsSnapshot {
-    values: Vec<(Vec<u8>, Vec<u8>)>,
+    #[serde(default)]
+    version: u16,
+    #[serde(deserialize_with = "deserialize_storage_values")]
+    values: StorageValues,
     signer_public: Vec<u8>,
     credential: Vec<u8>,
     credential_signature_key: Vec<u8>,
     group_ids: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyCredentialSnapshot {
+    #[serde(deserialize_with = "deserialize_storage_values")]
+    values: StorageValues,
+    signer_public: Vec<u8>,
+    credential: LegacyCredentialWithKey,
+    group_ids: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyCredentialWithKey {
+    credential: LegacyCredential,
+    signature_key: LegacySignatureKey,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyCredential {
+    credential_type: String,
+    serialized_credential_content: LegacyByteVector,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacySignatureKey {
+    value: LegacyByteVector,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyByteVector {
+    vec: Vec<u8>,
+}
+
+fn deserialize_storage_values<'de, D>(deserializer: D) -> Result<StorageValues, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StorageValuesVisitor;
+
+    impl<'de> Visitor<'de> for StorageValuesVisitor {
+        type Value = StorageValues;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an MLS storage map or an array of key-value pairs")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or_default());
+            while let Some(entry) = sequence.next_element()? {
+                values.push(entry);
+            }
+            Ok(values)
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut values = Vec::with_capacity(map.size_hint().unwrap_or_default());
+            while let Some(entry) = map.next_entry()? {
+                values.push(entry);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_any(StorageValuesVisitor)
 }
 
 fn operation(error: impl std::fmt::Debug) -> MlsError {
@@ -344,6 +466,10 @@ pub enum MlsError {
     Poisoned,
     #[error("MLS snapshot does not contain its signing key")]
     MissingSigner,
+    #[error("unsupported MLS snapshot version {0}")]
+    UnsupportedSnapshotVersion(u16),
+    #[error("unsupported legacy MLS credential type {0}")]
+    UnsupportedLegacyCredential(String),
     #[error("MLS operation failed: {0}")]
     Operation(String),
 }
@@ -351,6 +477,23 @@ pub enum MlsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Serialize)]
+    struct LegacyMapSnapshot {
+        values: BTreeMap<Vec<u8>, Vec<u8>>,
+        signer_public: Vec<u8>,
+        credential: Vec<u8>,
+        credential_signature_key: Vec<u8>,
+        group_ids: Vec<Vec<u8>>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyCredentialMapSnapshot {
+        values: StorageValues,
+        signer_public: Vec<u8>,
+        credential: CredentialWithKey,
+        group_ids: Vec<Vec<u8>>,
+    }
 
     #[test]
     fn two_devices_join_and_exchange_forward_secure_messages() {
@@ -429,5 +572,60 @@ mod tests {
             Err(MlsError::ControlMessage)
         ));
         assert!(alice.epoch(group_id).expect("owner epoch") > 1);
+    }
+
+    #[test]
+    fn restores_legacy_map_snapshot_and_rewrites_it_versioned() {
+        let mut client = MlsClient::new(b"legacy-device".to_vec()).expect("client");
+        let group_id = b"legacy-friends";
+        client.create_group(group_id).expect("group");
+
+        let current: MlsSnapshot =
+            ciborium::from_reader(client.snapshot().expect("snapshot").as_slice())
+                .expect("decode current snapshot");
+        let legacy = LegacyMapSnapshot {
+            values: current.values.into_iter().collect(),
+            signer_public: current.signer_public,
+            credential: current.credential,
+            credential_signature_key: current.credential_signature_key,
+            group_ids: current.group_ids,
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&legacy, &mut bytes).expect("encode legacy snapshot");
+
+        let restored = MlsClient::from_snapshot(&bytes).expect("restore legacy snapshot");
+        assert_eq!(restored.epoch(group_id).expect("epoch"), 0);
+
+        let rewritten: MlsSnapshot =
+            ciborium::from_reader(restored.snapshot().expect("rewrite").as_slice())
+                .expect("decode rewritten snapshot");
+        assert_eq!(rewritten.version, SNAPSHOT_VERSION);
+    }
+
+    #[test]
+    fn restores_legacy_structured_credential_snapshot() {
+        let mut client = MlsClient::new(b"legacy-credential-device".to_vec()).expect("client");
+        let group_id = b"legacy-credential-friends";
+        client.create_group(group_id).expect("group");
+        let values = client
+            .provider
+            .storage()
+            .values
+            .read()
+            .expect("storage lock")
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let legacy = LegacyCredentialMapSnapshot {
+            values,
+            signer_public: client.signer.public().to_vec(),
+            credential: client.credential.clone(),
+            group_ids: client.groups.keys().cloned().collect(),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&legacy, &mut bytes).expect("encode legacy snapshot");
+
+        let restored = MlsClient::from_snapshot(&bytes).expect("restore legacy snapshot");
+        assert_eq!(restored.epoch(group_id).expect("epoch"), 0);
     }
 }

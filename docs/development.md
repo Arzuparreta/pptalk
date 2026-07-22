@@ -1,5 +1,25 @@
 # Development
 
+## Entorno local
+
+Para el ciclo habitual no hace falta coordinar varios terminales:
+
+```sh
+./scripts/dev.sh start              # compila y arranca nodo + escritorio
+./scripts/dev.sh status             # PIDs, health y URL local
+./scripts/dev.sh logs node -f       # sigue el log del nodo
+./scripts/dev.sh logs desktop -f    # sigue el log de Qt y su backend
+./scripts/dev.sh restart --no-build # reinicio rápido
+./scripts/dev.sh stop               # para solo los procesos gestionados
+```
+
+En CI, SSH o una máquina sin sesión gráfica puede arrancarse únicamente el nodo
+con `./scripts/dev.sh start --node-only`. Los valores por defecto se pueden
+cambiar con `PPTALK_DEV_LISTEN`, `PPTALK_DEV_NODE_URL`,
+`PPTALK_DEV_DATA_DIR` y `PPTALK_DEV_STATE_DIR`; la ayuda integrada documenta
+los valores concretos. Si se cambia la dirección o el puerto de escucha, la URL
+debe apuntar al mismo nodo.
+
 ## Rust
 
 ```sh

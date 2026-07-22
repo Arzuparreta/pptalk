@@ -40,11 +40,25 @@ cmake -S apps/desktop -B build/desktop -G Ninja
 cmake --build build/desktop
 ```
 
-The node can be started with:
+## Desarrollo local
+
+El entorno completo se gestiona con un único script. Compila el CLI, el nodo
+mailbox y la aplicación Qt; arranca el nodo solo en localhost, comprueba su
+salud y abre el cliente nativo con la configuración correcta:
 
 ```sh
-cargo run -p pptalk-node -- --listen 0.0.0.0:9464
+./scripts/dev.sh start
+./scripts/dev.sh status
+./scripts/dev.sh logs -f
+./scripts/dev.sh stop
 ```
+
+Los procesos quedan en segundo plano. Sus PIDs, logs y datos locales se guardan
+en `build/dev/` (ignorado por Git), y `stop` valida que cada PID pertenezca a un
+binario de este repositorio antes de terminarlo. Para trabajar únicamente con
+el nodo, usa `./scripts/dev.sh start --node-only`; para reiniciar sin recompilar,
+`./scripts/dev.sh restart --no-build`. Ejecuta `./scripts/dev.sh help` para ver
+todas las opciones y variables de configuración.
 
 See [`docs/architecture.md`](docs/architecture.md) and
 [`docs/self-hosting.md`](docs/self-hosting.md) for the protocol and deployment
