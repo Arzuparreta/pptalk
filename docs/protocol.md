@@ -1,38 +1,76 @@
-# Protocol v1
+# Protocolo v1
 
-All structured messages use CBOR with a four-MiB allocation limit. Unknown
-incompatible versions are rejected before domain application.
+Documento para implementadores. El protocolo sigue en desarrollo: hasta la
+línea `1.x` no se promete compatibilidad entre versiones arbitrarias.
 
-## Durable synchronization
+## Codificación y límites
 
-`SyncFrame::Hello` advertises device identity and per-conversation causal
-frontiers. `Events` sends only sequences above that frontier. `Ack` advances the
-sender outbox. Event IDs and `(conversation, author_device, sequence)` are unique,
-so reconnect and mailbox retries are harmless.
+Los mensajes estructurados usan CBOR y llevan versión. La decodificación limita
+la asignación a 4 MiB y rechaza versiones incompatibles antes de aplicar cambios
+al dominio.
 
-The v0.1 daemon applies this model through encrypted per-device outbox retries
-and group frontier requests. A peer only re-emits events it originally authored,
-which preserves transport-authenticated authorship. Membership records carry a
-per-identity history floor, so a newly admitted identity cannot recover events
-from before its admission. A newly linked device of an existing identity keeps
-that identity's floor but receives a separate MLS leaf.
+Los archivos no se introducen completos en un mensaje CBOR. Se dividen en
+chunks cifrados y verificados mediante un manifiesto.
 
-Blob manifests contain ciphertext and chunk hashes. Chunks may arrive out of
-order, are deduplicated by index and are verified individually and as a complete
-ciphertext before atomic assembly. Direct sends switch the remaining chunks to
-the mailbox after a path failure.
+## Sincronización duradera
 
-## Calls
+`SyncFrame` tiene tres operaciones principales:
 
-`CallSignal` covers targeted invitations, silent join, leave and publication
-changes. RTP packets use QUIC datagrams on a separate media ALPN; group calls
-fan out one encoded stream across a peer mesh. The protocol reserves SDP/ICE and
-router-offer variants for interoperable transports, but the v0.1 runtime does
-not advertise an SFU.
+- `Hello`: anuncia identidad, dispositivo y fronteras conocidas.
+- `Events`: transmite secuencias que el receptor todavía no cubre.
+- `Ack`: confirma persistencia y permite retirar un elemento del outbox.
 
-## Nodes
+Un evento es único por su ID y por la combinación de conversación, dispositivo
+autor y secuencia. Por eso un reintento directo o desde buzón no duplica el
+mensaje visible.
 
-Node access is capability based. A mailbox capability is a 32-byte unguessable
-token represented as lowercase hex in HTTP paths. The payload remains a complete
-client-encrypted transport envelope. `POST` deposits with bounded TTL; `GET`
-atomically drains a bounded batch. Clients deduplicate event IDs after retries.
+Cada peer vuelve a emitir únicamente eventos que recibió del autor autenticado.
+La membresía guarda desde qué momento puede leer cada identidad; un miembro
+nuevo no puede pedir historia anterior a su admisión. Otro dispositivo de una
+identidad existente conserva ese límite, pero recibe una hoja MLS diferente.
+
+## Archivos
+
+El manifiesto incluye hashes del ciphertext completo y de cada chunk. El
+receptor puede aceptar chunks desordenados, deduplicarlos y ensamblarlos de forma
+atómica solo cuando todas las verificaciones son correctas.
+
+Si la ruta directa falla durante una transferencia, los chunks restantes pueden
+pasar al buzón sin cambiar el contenido cifrado.
+
+## Llamadas
+
+`CallSignal` expresa:
+
+- invitación con timbre;
+- apertura de sala sin timbre;
+- entrada y salida;
+- activación de micrófono, cámara o pantalla.
+
+Las señales viajan separadas de los datagramas multimedia. Una llamada de grupo
+replica el stream codificado a los peers de una malla. Hay variantes reservadas
+para SDP/ICE y ofertas de router, pero la versión actual no anuncia un SFU.
+
+## Buzón
+
+El acceso es por capacidad. La ruta contiene un token aleatorio de 32 bytes en
+hexadecimal:
+
+```text
+POST /v1/mailboxes/<capacidad>/messages?ttl=<segundos>
+GET  /v1/mailboxes/<capacidad>/messages?limit=<cantidad>
+```
+
+`POST` guarda un sobre ya cifrado. `GET` extrae atómicamente un lote. El cliente
+deduplica por ID si una respuesta se pierde y el envío se repite.
+
+La capacidad es direccional y no identifica una cuenta global. El nodo impone
+tamaño, cuota y caducidad, pero no puede descifrar ni validar el contenido de la
+conversación.
+
+## Evolución del estado local
+
+Las snapshots MLS llevan una versión propia. El lector admite los formatos
+anteriores conocidos y los reescribe al abrirlos. Una versión futura desconocida
+se rechaza: nunca debe resolverse una incompatibilidad descartando silenciosamente
+claves o creando otra identidad.

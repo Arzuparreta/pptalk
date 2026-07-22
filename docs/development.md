@@ -1,43 +1,44 @@
-# Development
+# Desarrollo
+
+Esta página es para contribuir al código. Para instalar y utilizar la aplicación
+consulta [instalación](installation.md) y [guía de uso](user-guide.md).
 
 ## Entorno local
 
-Para el ciclo habitual no hace falta coordinar varios terminales:
-
 ```sh
 ./scripts/dev.sh start              # compila y arranca nodo + escritorio
-./scripts/dev.sh status             # PIDs, health y URL local
-./scripts/dev.sh logs node -f       # sigue el log del nodo
-./scripts/dev.sh logs desktop -f    # sigue el log de Qt y su backend
-./scripts/dev.sh restart --no-build # reinicio rápido
-./scripts/dev.sh stop               # para solo los procesos gestionados
+./scripts/dev.sh status             # muestra PIDs, health y URL
+./scripts/dev.sh logs desktop -f    # sigue el cliente y su backend
+./scripts/dev.sh logs node -f       # sigue el buzón local
+./scripts/dev.sh restart --no-build # reinicia sin recompilar
+./scripts/dev.sh stop               # para solo procesos de este repo
 ```
 
-En CI, SSH o una máquina sin sesión gráfica puede arrancarse únicamente el nodo
-con `./scripts/dev.sh start --node-only`. Los valores por defecto se pueden
-cambiar con `PPTALK_DEV_LISTEN`, `PPTALK_DEV_NODE_URL`,
-`PPTALK_DEV_DATA_DIR` y `PPTALK_DEV_STATE_DIR`; la ayuda integrada documenta
-los valores concretos. Si se cambia la dirección o el puerto de escucha, la URL
-debe apuntar al mismo nodo.
+Usa `start --node-only` en una sesión sin entorno gráfico. La ayuda integrada
+documenta `PPTALK_DEV_LISTEN`, `PPTALK_DEV_NODE_URL`, `PPTALK_DEV_DATA_DIR`,
+`PPTALK_DEV_STATE_DIR` y `CARGO_TARGET_DIR`.
 
-## Rust
+## Comprobaciones antes de entregar un cambio
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo audit
-cargo build -p pptalk-cli
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 python3 scripts/smoke-e2e.py
 ```
 
-The Rust integration test uses two real local Iroh endpoints and asserts that
-plaintext is absent from wire bytes. The end-to-end smoke additionally drives
-real daemon processes through offline outbox recovery, causal MLS catch-up,
-silent/ringing call signaling, group attachment transfer, linked-device fan-out
-and revocation.
+Para revisar dependencias conocidas como vulnerables:
 
-## Native desktop
+```sh
+cargo audit
+```
+
+El smoke test usa procesos reales y cubre reconexión, outbox, sincronización
+causal MLS, archivos de grupo, llamadas, segundo dispositivo y revocación.
+
+## Cliente nativo
+
+El script es la ruta habitual. Para compilar Qt de forma aislada:
 
 ```sh
 cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -45,10 +46,13 @@ cmake --build build/desktop
 QT_QPA_PLATFORM=offscreen timeout 3s ./build/desktop/pptalk-desktop
 ```
 
-Qt 6.8+ and GStreamer development packages are required. No Node.js toolchain or
-browser runtime is used.
+El controlador Qt inicia `pptalk-cli daemon`. Durante desarrollo, define
+`PPTALK_CLI` si el binario no está junto al ejecutable de escritorio. No hay
+toolchain Node.js ni runtime de navegador.
 
-## Headless end-to-end workflow
+## Cliente headless
+
+El CLI permite depurar dos identidades sin interfaz:
 
 ```sh
 pptalk-cli init --profile alice.json --name Alice
@@ -59,12 +63,20 @@ pptalk-cli listen --profile alice.json
 pptalk-cli send --profile bob.json --contact Alice 'hola'
 ```
 
-The listener emits newline-delimited JSON for native frontend integration.
+`daemon` habla JSON Lines por entrada y salida estándar. Es el contrato con el
+controlador nativo; cualquier cambio en sus comandos o eventos debe probarse en
+ambos lados.
 
-For a second device, run `pptalk-cli link-device --profile alice.json --label
-Laptop`, transfer the resulting ten-minute capability over a trusted channel,
-then use `pptalk-cli import-device --profile laptop.json 'pptalk://device/v1#…'`.
-The imported device has a distinct Ed25519 key and Iroh endpoint. MLS leaves are
-never cloned: the group owner recognizes the signed device authorization, adds a
-fresh leaf and sends a normal MLS Welcome. Revocation removes that leaf and
-advances the group epoch.
+## Dónde está cada cosa
+
+- `apps/desktop`: interfaz Qt Quick y controlador C++.
+- `apps/cli`: daemon y herramientas headless.
+- `apps/node`: buzón opcional.
+- `crates/core`: identidades, reglas y cifrado de dominio.
+- `crates/mls`: estado de grupos MLS.
+- `crates/network`: transporte Iroh.
+- `crates/storage`: SQLCipher y outbox.
+- `crates/media`: captura y política multimedia GStreamer.
+- `crates/protocol`: tipos CBOR versionados.
+
+Las reglas internas para agentes y mantenedores están en [AGENTS.md](../AGENTS.md).

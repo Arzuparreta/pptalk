@@ -1,88 +1,102 @@
 # pptalk
 
-Private, local-first communication for friends: encrypted chat, calls, video and
-screen sharing over direct peer-to-peer connections with replaceable relays.
+Habla con tus amigos sin una cuenta central y sin entregar tus conversaciones a
+una empresa. pptalk es una aplicación nativa de escritorio para mensajes,
+archivos, grupos y llamadas cifradas entre los dispositivos de sus usuarios.
 
-This repository contains the native desktop client, the reusable Rust core and
-the optional self-hosted node. No central account or server owns an identity,
-conversation or message history.
+> **Estado actual:** funciona como versión de desarrollo, pero todavía no es un
+> producto auditado ni tiene instaladores estables. No lo uses aún si una
+> vulnerabilidad pudiera poner a alguien en peligro.
 
-## What works
+## Empezar
 
-- native Qt Quick desktop with direct/group chat, encrypted files, invitations and call controls
-- signed device identities, live multi-device fan-out/revocation and creator-owned groups
-- RFC 9420 MLS group epochs, creator-controlled membership and SQLCipher history
-- direct authenticated QUIC plus automatic encrypted relay fallback through Iroh
-- durable local outbox plus causal group catch-up after a peer reconnects
-- signed one-use contact links and a usable headless encrypted messaging flow
-- native GStreamer RTP capture/playback for voice, camera and screen sources
-- separate call signaling and P2P mesh fan-out (optimized for eight, without a hard cap)
-- optional durable capability mailbox with TTL and quota enforcement
-- Linux x86_64/ARM64 and Windows build coverage
-
-The protocol is versioned from the first commit. Compatibility is not promised
-until the `1.x` protocol line. This is a working developer release, not an
-independently audited security product; read the [threat model](docs/threat-model.md).
-
-## Build
-
-Requirements:
-
-- Rust 1.91 or newer
-- CMake and Ninja
-- Qt 6.8 or newer (`Core`, `Gui`, `Qml`, `Quick`, `QuickControls2`)
-- GStreamer 1.24 or newer with RTP, Opus, H.264 and native capture/sink plugins
+Necesitas Linux, Rust 1.91+, CMake, Ninja, Qt 6.8+ y GStreamer 1.24+. La
+[guía de instalación](docs/installation.md) explica los requisitos y también el
+proceso para Windows.
 
 ```sh
-cargo test --workspace
-cargo run -p pptalk-cli -- doctor
-cmake -S apps/desktop -B build/desktop -G Ninja
-cmake --build build/desktop
+git clone https://github.com/Arzuparreta/pptalk.git
+cd pptalk
+./scripts/dev.sh start
 ```
 
-## Desarrollo local
+La primera compilación puede tardar varios minutos. Al terminar se abrirá la
+aplicación y se creará automáticamente una identidad local. No hay registro,
+correo electrónico ni contraseña.
 
-El entorno completo se gestiona con un único script. Compila el CLI, el nodo
-mailbox y la aplicación Qt; arranca el nodo solo en localhost, comprueba su
-salud y abre el cliente nativo con la configuración correcta:
+Para cerrar todo:
 
 ```sh
-./scripts/dev.sh start
-./scripts/dev.sh status
-./scripts/dev.sh logs -f
 ./scripts/dev.sh stop
 ```
 
-Los procesos quedan en segundo plano. Sus PIDs, logs y datos locales se guardan
-en `build/dev/` (ignorado por Git), y `stop` valida que cada PID pertenezca a un
-binario de este repositorio antes de terminarlo. Para trabajar únicamente con
-el nodo, usa `./scripts/dev.sh start --node-only`; para reiniciar sin recompilar,
-`./scripts/dev.sh restart --no-build`. Ejecuta `./scripts/dev.sh help` para ver
-todas las opciones y variables de configuración.
+## Añadir a un amigo
 
-See [`docs/architecture.md`](docs/architecture.md) and
-[`docs/self-hosting.md`](docs/self-hosting.md) for the protocol and deployment
-model. Security reports and the supported disclosure channel are in
-[`SECURITY.md`](SECURITY.md).
+Los dos debéis tener pptalk abierto durante la primera conexión.
 
-## Try two peers
+1. Pulsa **+** en la esquina superior izquierda.
+2. Pulsa **Copiar enlace** y envíaselo a tu amigo por un canal de confianza.
+3. Tu amigo abre su propio botón **+**, pega el enlace y pulsa **Aceptar**.
+4. La conversación aparecerá en la columna izquierda.
+
+El enlace caduca y solo se puede aceptar una vez. No lo publiques: durante su
+vigencia funciona como una invitación privada.
+
+## Hablar
+
+- Escribe abajo y pulsa `Enter` para enviar. `Shift + Enter` añade una línea.
+- Pulsa el **+** junto al cuadro de texto para enviar un archivo cifrado.
+- Pulsa el **teléfono** para llamar o abrir una sala sin hacer sonar al otro.
+- Pulsa **◫** arriba a la izquierda para crear un grupo con contactos existentes.
+- Pulsa **⚙** para configurar vídeo, un buzón opcional o un segundo dispositivo.
+
+La [guía de uso](docs/user-guide.md) explica cada pantalla, los grupos, las
+llamadas, el uso sin conexión y la vinculación de dispositivos.
+
+## Qué significa “peer to peer” aquí
+
+Cuando es posible, los dispositivos se conectan directamente. Si la red lo
+impide, pueden usar transporte intermedio cifrado. Ese transporte puede ver que
+existe tráfico, pero no el contenido.
+
+Un nodo de buzón es opcional. Sirve para guardar sobres ya cifrados mientras el
+destinatario está desconectado; no contiene cuentas, historial legible ni claves
+de descifrado. Puedes usar pptalk sin configurar uno.
+
+Tus claves y tu historial viven en tus dispositivos. Esto evita una autoridad
+central, pero tiene una consecuencia importante: si pierdes todos tus
+dispositivos, no existe un botón corporativo para recuperar la cuenta.
+
+## Si algo falla
 
 ```sh
-cargo run -p pptalk-cli -- init --profile /tmp/alice.json --name Alice
-cargo run -p pptalk-cli -- init --profile /tmp/bob.json --name Bob
-cargo run -p pptalk-cli -- invite --profile /tmp/alice.json
-# accept the printed link on Bob, keep Alice listening, then send:
-cargo run -p pptalk-cli -- listen --profile /tmp/alice.json
-cargo run -p pptalk-cli -- send --profile /tmp/bob.json --contact Alice 'hola'
+./scripts/dev.sh status
+./scripts/dev.sh logs -f
+./scripts/dev.sh doctor
+./scripts/dev.sh restart
 ```
 
-For offline delivery, initialize with `--mailbox-url https://your-node.example`
-or configure the URL from desktop settings. Device links are ten-minute
-capabilities generated in Settings; on a fresh desktop launch they can be
-imported with `PPTALK_DEVICE_LINK='pptalk://device/v1#…'`.
+Consulta [problemas comunes](docs/user-guide.md#problemas-comunes) antes de
+borrar ningún perfil. La actualización de datos locales es automática; un error
+de formato no significa que debas perder tu identidad.
 
-## Licensing
+## Documentación
 
-- Desktop client and shared client code: `GPL-3.0-or-later`
-- Network services in `apps/node`: `AGPL-3.0-or-later`
-- Documentation and packaging: `GPL-3.0-or-later`
+Para usar pptalk:
+
+- [Instalación](docs/installation.md)
+- [Guía de uso](docs/user-guide.md)
+- [Seguridad y límites](docs/threat-model.md)
+- [Montar un buzón propio](docs/self-hosting.md)
+
+Para desarrollar pptalk:
+
+- [Desarrollo y pruebas](docs/development.md)
+- [Arquitectura](docs/architecture.md)
+- [Protocolo](docs/protocol.md)
+- [Política de seguridad](SECURITY.md)
+
+## Licencia
+
+El cliente y las bibliotecas compartidas usan `GPL-3.0-or-later`. El nodo de red
+usa `AGPL-3.0-or-later`. Consulta [LICENSE](LICENSE) y [LICENSES](LICENSES/).

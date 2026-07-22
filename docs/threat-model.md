@@ -1,42 +1,70 @@
-# Threat model
+# Seguridad y límites
 
-## Protected
+pptalk está diseñado para reducir la confianza en servidores, pero no vuelve
+invisible al usuario ni protege un ordenador ya comprometido.
 
-- Message, attachment and call content against relays, mailbox nodes, network
-  observers and service operators.
-- Identity/device changes against forgery and log forks.
-- Local conversation databases at rest through SQLCipher.
-- Invitation reachability data against modification; the inviter consumes a
-  pending capability on the first authenticated response.
-- Manual media quality choices against silent fallback.
+## Qué protege
 
-## Observable metadata
+- El contenido de mensajes y archivos frente a relays, buzones, operadores y
+  observadores de red.
+- El contenido de llamadas durante el transporte.
+- Los cambios de identidad y dispositivo frente a falsificaciones o forks.
+- El historial local mediante una base SQLCipher.
+- Las invitaciones frente a modificaciones durante su vigencia.
 
-A network observer or relay can learn approximate online times, endpoint pairs,
-traffic volume and timing. Padding reduces size leakage but does not provide an
-anonymity network. A mailbox operator sees capability buckets, expiry and blob
-sizes. Contact display names are not registered globally.
+## Qué sigue siendo visible
 
-## Trust assumptions
+Un relay u observador puede inferir cuándo hay dispositivos conectados, qué
+volumen de tráfico generan y durante cuánto tiempo. Un buzón conoce tamaños,
+caducidades y el uso de cada capacidad. El padding reduce filtraciones de tamaño,
+pero pptalk no es una red de anonimato.
 
-The operating system, active device process and input/output drivers are trusted.
-Malware with access to an unlocked process can read messages. Contact safety
-requires checking an out-of-band fingerprint when impersonation matters.
+Los nombres visibles de los contactos no están registrados globalmente.
 
-## Recovery and compromise
+## Qué debe ser de confianza
 
-There is no central password reset. A still-authorized device can revoke another
-device; peers reject its stale identity log, stop direct fan-out and group owners
-remove its MLS leaf. If every device is lost, the identity and
-unexported history are unavailable. This is an availability cost, not a backdoor.
+El sistema operativo, el proceso de pptalk y los dispositivos de entrada y
+salida deben estar limpios. Malware con acceso a una sesión desbloqueada puede
+leer mensajes, capturar pantalla o usar el micrófono.
 
-The current profile stores endpoint/device seed material in a mode-0600 file.
-SQLCipher protects conversation history, but its key currently lives beside the
-profile. Full-disk encryption and a locked desktop session are therefore part of
-the local-at-rest trust assumption for this release. Moving profile seeds into
-the OS credential vault remains required before calling the client hardened.
+Una invitación demuestra posesión del enlace, no la identidad civil de quien lo
+envió. La interfaz actual aún no muestra una comparación de huellas: cuando esa
+verificación sea necesaria, no confíes únicamente en el nombre visible ni uses
+esta versión para una relación de alto riesgo.
 
-## Non-goals for 1.0
+## Pérdida o robo de un dispositivo
 
-Anonymous communication, public discovery, communities, bots, recording,
-transcription, browser access, cloud backup and game overlays are out of scope.
+Otro dispositivo autorizado puede revocarlo. Los peers dejan de aceptar su
+estado antiguo y los grupos controlados cambian de época MLS.
+
+La revocación no borra los archivos que el equipo robado ya tuviera ni vence a
+malware que extrajo claves antes de ser revocado.
+
+Si pierdes todos los dispositivos, no hay recuperación central. Esa es la
+contrapartida de no mantener una autoridad con capacidad de restablecer tu
+identidad.
+
+## Protección local actual
+
+La conversación está en SQLCipher, pero la clave de esa base reside actualmente
+junto al perfil del dispositivo, protegido con permisos de usuario. Para esta
+versión se asume cifrado completo de disco y una sesión de escritorio bloqueada.
+
+Mover las semillas y claves al almacén seguro del sistema operativo sigue siendo
+necesario antes de considerar el cliente endurecido.
+
+## Fuera de alcance actualmente
+
+- anonimato de red;
+- descubrimiento público de personas;
+- comunidades y bots;
+- grabación o transcripción;
+- acceso desde navegador;
+- copia de seguridad en la nube;
+- overlays para juegos.
+
+## Estado de auditoría
+
+No ha habido una auditoría de seguridad independiente. No uses esta versión en
+situaciones donde una vulnerabilidad pueda poner a alguien en peligro. Para
+reportar un fallo consulta [SECURITY.md](../SECURITY.md).

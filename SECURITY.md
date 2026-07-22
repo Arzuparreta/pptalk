@@ -1,12 +1,23 @@
-# Security policy
+# Política de seguridad
 
-pptalk is a developer release and has not received an independent security
-audit. Do not use it yet where compromise could put someone in danger.
+pptalk es una versión de desarrollo y no ha recibido una auditoría de seguridad
+independiente. No debe usarse todavía en situaciones donde una vulnerabilidad
+pueda poner a alguien en peligro.
 
-Report a suspected vulnerability privately through GitHub Security Advisories
-for this repository. Include the affected version, platform, reproduction and
-impact. Please do not open a public issue before a fix is available.
+## Reportar una vulnerabilidad
 
-Every change is checked with Rust tests, Clippy and the RustSec advisory
-database. The threat boundary and currently accepted local-key limitation are
-documented in [`docs/threat-model.md`](docs/threat-model.md).
+Usa de forma privada **GitHub Security Advisories** en este repositorio. Incluye:
+
+- versión o commit afectado;
+- sistema operativo;
+- pasos mínimos para reproducirlo;
+- impacto esperado;
+- cualquier mitigación conocida.
+
+No abras un issue público antes de que exista una corrección coordinada.
+
+El [modelo de amenazas](docs/threat-model.md) explica qué intenta proteger el
+proyecto, qué metadatos permanecen visibles y cuáles son las limitaciones
+locales aceptadas en esta fase.
+
+Los cambios se comprueban con tests de Rust, Clippy y la base de avisos RustSec.

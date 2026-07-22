@@ -1,37 +1,88 @@
-# Self-hosting `pptalk-node`
+# Montar un buzón propio
 
-The node is optional. Direct communication and local/LAN use do not depend on it.
-It is licensed AGPL-3.0-or-later because operators provide it as a network
-service.
+## ¿Lo necesitas?
+
+No para hablar cuando ambos dispositivos están conectados. El buzón solo ayuda a
+entregar mensajes ya cifrados mientras alguien está desconectado.
+
+El nodo:
+
+- no crea cuentas;
+- no conoce los contactos o grupos;
+- no recibe claves de descifrado;
+- no participa en llamadas;
+- sí puede observar horarios, tamaños y capacidades de buzón.
+
+## Probarlo en local
+
+El entorno de desarrollo ya lo arranca en `127.0.0.1:9464`:
 
 ```sh
-cargo build --release -p pptalk-node
+./scripts/dev.sh start --node-only
+curl http://127.0.0.1:9464/healthz
+./scripts/dev.sh stop
+```
+
+Una respuesta `ok` indica que está listo. Esa dirección solo sirve en la misma
+máquina; no es un buzón para amigos a través de Internet.
+
+## Compilar el nodo
+
+```sh
+cargo build --locked --release -p pptalk-node
 ./target/release/pptalk-node \
-  --listen 0.0.0.0:9464 \
+  --listen 127.0.0.1:9464 \
   --data-dir /var/lib/pptalk-node
 ```
 
-Health check: `GET /healthz`.
+También existe [apps/node/Dockerfile](../apps/node/Dockerfile). El contenedor
+expone el puerto `9464` y usa `/var/lib/pptalk-node` como volumen persistente.
 
-Mailbox API:
+## Publicarlo de forma segura
 
-```text
-POST /v1/mailboxes/<64-hex-capability>/messages?ttl=86400
-GET  /v1/mailboxes/<64-hex-capability>/messages?limit=128
-```
+Mantén el proceso escuchando en localhost y coloca delante un proxy inverso con
+HTTPS. Para producción:
 
-Put TLS in front of the listener, restrict request rates at the reverse proxy,
-and monitor free disk. Defaults are four MiB per envelope, 256 MiB per capability
-and seven days. The node never receives a decryption key.
+1. crea un usuario de sistema sin privilegios;
+2. da acceso de escritura únicamente al directorio de datos;
+3. usa TLS válido en el proxy;
+4. limita peticiones y tamaño de cuerpo;
+5. vigila espacio libre y copias del volumen;
+6. comprueba periódicamente `GET /healthz`.
 
-Configure the desktop in Settings, or initialize a headless profile with:
+Se incluye una unidad de ejemplo en
+[packaging/systemd/pptalk-node.service](../packaging/systemd/pptalk-node.service).
+Revisa rutas y usuario antes de instalarla.
+
+Los límites actuales son:
+
+- 4 MiB por sobre;
+- 256 MiB por capacidad;
+- 7 días de retención máxima.
+
+## Configurar los clientes
+
+En el escritorio abre **⚙ → Nodo de buzón cifrado**, introduce la URL HTTPS y
+pulsa **Guardar**.
+
+Para un perfil headless:
 
 ```sh
 pptalk-cli init --profile alice.json --name Alice \
   --mailbox-url https://pptalk.example
 ```
 
-Mailbox capabilities are directional: even two contacts using the same node
-cannot drain each other's queues. Plain HTTP is rejected except for loopback
-development URLs. The current node provides durable mailbox service; live media
-uses the authenticated Iroh mesh and does not depend on this HTTP service.
+HTTP se acepta únicamente en direcciones loopback para desarrollo. Dos personas
+pueden usar el mismo nodo sin compartir capacidad: cada ruta de entrega utiliza
+un token distinto.
+
+## API mínima
+
+```text
+GET  /healthz
+POST /v1/mailboxes/<64-caracteres-hex>/messages?ttl=86400
+GET  /v1/mailboxes/<64-caracteres-hex>/messages?limit=128
+```
+
+El cuerpo de `POST` es opaco. `GET` drena el lote solicitado; los clientes se
+encargan de autenticidad, descifrado y deduplicación.
