@@ -21,8 +21,9 @@ cd pptalk
 ```
 
 La primera compilación puede tardar varios minutos. Al terminar se abrirá la
-aplicación y se creará automáticamente una identidad local. No hay registro,
-correo electrónico ni contraseña.
+aplicación: escribe cómo quieres que te vean tus amigos para crear una identidad
+local, o elige **Vincular equipo** o **Restaurar copia**. No hay registro ni
+correo electrónico.
 
 Para cerrar todo:
 
@@ -35,7 +36,8 @@ Para cerrar todo:
 Los dos debéis tener pptalk abierto durante la primera conexión.
 
 1. Pulsa **+** en la esquina superior izquierda.
-2. Pulsa **Copiar enlace** y envíaselo a tu amigo por un canal de confianza.
+2. Enseña el QR o pulsa **Copiar enlace** y envíaselo a tu amigo por un canal de
+   confianza.
 3. Tu amigo abre su propio botón **+**, pega el enlace, pulsa **Revisar invitación**
    y confirma tu nombre.
 4. La conversación aparecerá en la columna izquierda.
@@ -47,6 +49,7 @@ vigencia funciona como una invitación privada.
 
 - Escribe abajo y pulsa `Enter` para enviar. `Shift + Enter` añade una línea.
 - Pulsa el **+** junto al cuadro de texto para enviar un archivo cifrado.
+- También puedes arrastrar archivos sobre la conversación.
 - Pulsa el **teléfono** para llamar o abrir una sala sin hacer sonar al otro.
 - Pulsa **◫** arriba a la izquierda para crear un grupo con contactos existentes.
 - Pulsa **⚙** para cambiar tu perfil, configurar llamadas o vincular otro dispositivo.
@@ -66,9 +69,10 @@ está desconectado, el envío queda pendiente en tu dispositivo hasta que vuelve
 existir una ruta; el almacenamiento distribuido sin conexión todavía está en
 evaluación y no se anuncia como disponible.
 
-Tus claves y tu historial viven en tus dispositivos. Esto evita una autoridad
-central, pero tiene una consecuencia importante: si pierdes todos tus
-dispositivos, no existe un botón corporativo para recuperar la cuenta.
+Tus claves y tu historial viven en tus dispositivos. En **Ajustes** puedes
+proteger la clave del historial con el almacén seguro del sistema y crear una
+copia cifrada de tu identidad. No existe un botón corporativo de recuperación:
+conserva la frase y el archivo de copia por separado.
 
 ## Si algo falla
 

@@ -15,6 +15,10 @@ class AppController final : public QObject
     Q_PROPERTY(QVariantList contacts READ contacts NOTIFY contactsChanged)
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
     Q_PROPERTY(QVariantList devices READ devices NOTIFY devicesChanged)
+    Q_PROPERTY(QVariantList directContacts READ directContacts NOTIFY contactsChanged)
+    Q_PROPERTY(QVariantList mediaDevices READ mediaDevices NOTIFY mediaDevicesChanged)
+    Q_PROPERTY(QVariantList callParticipants READ callParticipants NOTIFY callChanged)
+    Q_PROPERTY(QVariantList transfers READ transfers NOTIFY transfersChanged)
     Q_PROPERTY(QVariantList searchResults READ searchResults NOTIFY searchResultsChanged)
     Q_PROPERTY(QString profileName READ profileName NOTIFY profileChanged)
     Q_PROPERTY(QString profileAvatar READ profileAvatar NOTIFY profileChanged)
@@ -22,6 +26,7 @@ class AppController final : public QObject
     Q_PROPERTY(QString presence READ presence NOTIFY conversationChanged)
     Q_PROPERTY(QString connectionLabel READ connectionLabel NOTIFY connectionChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY connectionChanged)
+    Q_PROPERTY(QString focusedMessageId READ focusedMessageId NOTIFY messagesChanged)
     Q_PROPERTY(bool conversationIsGroup READ conversationIsGroup NOTIFY conversationChanged)
     Q_PROPERTY(bool currentGroupOwned READ currentGroupOwned NOTIFY conversationChanged)
     Q_PROPERTY(bool currentGroupAdmin READ currentGroupAdmin NOTIFY conversationChanged)
@@ -31,9 +36,18 @@ class AppController final : public QObject
     Q_PROPERTY(bool currentConversationArchived READ currentConversationArchived NOTIFY conversationChanged)
     Q_PROPERTY(bool currentConversationMuted READ currentConversationMuted NOTIFY conversationChanged)
     Q_PROPERTY(QString inviteLink READ inviteLink NOTIFY inviteLinkChanged)
+    Q_PROPERTY(QString inviteQr READ inviteQr NOTIFY inviteLinkChanged)
     Q_PROPERTY(QString invitePreviewName READ invitePreviewName NOTIFY invitePreviewChanged)
     Q_PROPERTY(QString invitePreviewExpiry READ invitePreviewExpiry NOTIFY invitePreviewChanged)
     Q_PROPERTY(QString deviceLink READ deviceLink NOTIFY deviceLinkChanged)
+    Q_PROPERTY(QString currentContactFingerprint READ currentContactFingerprint NOTIFY conversationChanged)
+    Q_PROPERTY(bool currentContactVerified READ currentContactVerified NOTIFY conversationChanged)
+    Q_PROPERTY(bool onboardingRequired READ onboardingRequired NOTIFY onboardingChanged)
+    Q_PROPERTY(QString onboardingLink READ onboardingLink NOTIFY onboardingChanged)
+    Q_PROPERTY(QString backupStatus READ backupStatus NOTIFY backupStatusChanged)
+    Q_PROPERTY(bool secureStorageEnabled READ secureStorageEnabled NOTIFY settingsChanged)
+    Q_PROPERTY(QString microphoneTestStatus READ microphoneTestStatus NOTIFY settingsChanged)
+    Q_PROPERTY(bool archivedVisible READ archivedVisible WRITE setArchivedVisible NOTIFY settingsChanged)
     Q_PROPERTY(bool callActive READ callActive NOTIFY callChanged)
     Q_PROPERTY(bool microphoneEnabled READ microphoneEnabled NOTIFY callChanged)
     Q_PROPERTY(bool cameraEnabled READ cameraEnabled NOTIFY callChanged)
@@ -44,6 +58,7 @@ class AppController final : public QObject
     Q_PROPERTY(QString callState READ callState NOTIFY callChanged)
     Q_PROPERTY(bool doNotDisturb READ doNotDisturb WRITE setDoNotDisturb NOTIFY settingsChanged)
     Q_PROPERTY(QString voiceMode READ voiceMode WRITE setVoiceMode NOTIFY settingsChanged)
+    Q_PROPERTY(QString pushToTalkShortcut READ pushToTalkShortcut WRITE setPushToTalkShortcut NOTIFY settingsChanged)
     Q_PROPERTY(bool platformSupportsAutostart READ platformSupportsAutostart CONSTANT)
     Q_PROPERTY(bool autostartEnabled READ autostartEnabled WRITE setAutostartEnabled NOTIFY settingsChanged)
     Q_PROPERTY(bool updateAvailable READ updateAvailable NOTIFY updateChanged)
@@ -56,6 +71,10 @@ public:
     [[nodiscard]] QVariantList contacts() const;
     [[nodiscard]] QVariantList messages() const;
     [[nodiscard]] QVariantList devices() const;
+    [[nodiscard]] QVariantList directContacts() const;
+    [[nodiscard]] QVariantList mediaDevices() const;
+    [[nodiscard]] QVariantList callParticipants() const;
+    [[nodiscard]] QVariantList transfers() const;
     [[nodiscard]] QVariantList searchResults() const;
     [[nodiscard]] QString profileName() const;
     [[nodiscard]] QString profileAvatar() const;
@@ -63,6 +82,7 @@ public:
     [[nodiscard]] QString presence() const;
     [[nodiscard]] QString connectionLabel() const;
     [[nodiscard]] QString lastError() const;
+    [[nodiscard]] QString focusedMessageId() const;
     [[nodiscard]] bool conversationIsGroup() const;
     [[nodiscard]] bool currentGroupOwned() const;
     [[nodiscard]] bool currentGroupAdmin() const;
@@ -72,9 +92,18 @@ public:
     [[nodiscard]] bool currentConversationArchived() const;
     [[nodiscard]] bool currentConversationMuted() const;
     [[nodiscard]] QString inviteLink() const;
+    [[nodiscard]] QString inviteQr() const;
     [[nodiscard]] QString invitePreviewName() const;
     [[nodiscard]] QString invitePreviewExpiry() const;
     [[nodiscard]] QString deviceLink() const;
+    [[nodiscard]] QString currentContactFingerprint() const;
+    [[nodiscard]] bool currentContactVerified() const;
+    [[nodiscard]] bool onboardingRequired() const;
+    [[nodiscard]] QString onboardingLink() const;
+    [[nodiscard]] QString backupStatus() const;
+    [[nodiscard]] bool secureStorageEnabled() const;
+    [[nodiscard]] QString microphoneTestStatus() const;
+    [[nodiscard]] bool archivedVisible() const;
     [[nodiscard]] bool callActive() const;
     [[nodiscard]] bool microphoneEnabled() const;
     [[nodiscard]] bool cameraEnabled() const;
@@ -85,6 +114,7 @@ public:
     [[nodiscard]] QString callState() const;
     [[nodiscard]] bool doNotDisturb() const;
     [[nodiscard]] QString voiceMode() const;
+    [[nodiscard]] QString pushToTalkShortcut() const;
     [[nodiscard]] bool platformSupportsAutostart() const;
     [[nodiscard]] bool autostartEnabled() const;
     [[nodiscard]] bool updateAvailable() const;
@@ -98,12 +128,24 @@ public:
     Q_INVOKABLE void deleteMessageLocal(const QString &messageId);
     Q_INVOKABLE void search(const QString &query);
     Q_INVOKABLE void clearSearch();
-    Q_INVOKABLE void openSearchResult(const QString &conversationKey);
+    Q_INVOKABLE void openSearchResult(const QString &conversationKey,
+                                      const QString &messageId);
     Q_INVOKABLE void openMessageFile(const QString &path);
     Q_INVOKABLE void sendFile(const QUrl &file);
+    Q_INVOKABLE void cancelTransfer(const QString &transferId);
+    Q_INVOKABLE void initializeProfile(const QString &name);
+    Q_INVOKABLE void importDeviceLink(const QString &link);
+    Q_INVOKABLE void exportIdentityBackup(const QUrl &file, const QString &passphrase);
+    Q_INVOKABLE void restoreIdentityBackup(const QUrl &file, const QString &passphrase);
+    Q_INVOKABLE void protectLocalSecrets();
+    Q_INVOKABLE void testMicrophone();
+    Q_INVOKABLE QString draft() const;
+    Q_INVOKABLE void saveDraft(const QString &body);
     Q_INVOKABLE void createInvite();
     Q_INVOKABLE void createGroup(const QString &name, const QString &members);
     Q_INVOKABLE void configureVideoQuality(int preset);
+    Q_INVOKABLE void selectMediaDevice(const QString &kind, const QString &deviceId);
+    Q_INVOKABLE QString selectedMediaDevice(const QString &kind) const;
     Q_INVOKABLE void createDeviceLink(const QString &label);
     Q_INVOKABLE void revokeDevice(const QString &deviceId);
     Q_INVOKABLE void copyDeviceLink();
@@ -125,15 +167,21 @@ public:
     Q_INVOKABLE void toggleMicrophone();
     Q_INVOKABLE void toggleCamera();
     Q_INVOKABLE void toggleScreenShare();
+    Q_INVOKABLE void setParticipantVolume(const QString &deviceId, double volume);
     Q_INVOKABLE void removeCurrentContact();
     Q_INVOKABLE void setCurrentContactBlocked(bool blocked);
     Q_INVOKABLE void setCurrentContactPrivacy(bool hidden);
+    Q_INVOKABLE void setCurrentContactVerified(bool verified);
     Q_INVOKABLE void setCurrentConversationPreferences(bool pinned, bool archived, bool muted);
     Q_INVOKABLE void holdCall();
     Q_INVOKABLE void resumeHeldCall();
+    Q_INVOKABLE void dismissError();
+    Q_INVOKABLE void handleExternalLink(const QString &link);
     void setDoNotDisturb(bool enabled);
     void setVoiceMode(const QString &mode);
+    void setPushToTalkShortcut(const QString &shortcut);
     void setAutostartEnabled(bool enabled);
+    void setArchivedVisible(bool visible);
 
 signals:
     void contactsChanged();
@@ -144,17 +192,24 @@ signals:
     void invitePreviewChanged();
     void deviceLinkChanged();
     void devicesChanged();
+    void mediaDevicesChanged();
+    void transfersChanged();
     void searchResultsChanged();
     void profileChanged();
     void callChanged();
     void settingsChanged();
     void updateChanged();
+    void onboardingChanged();
+    void backupStatusChanged();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void startBackend();
+    void launchBackend();
+    [[nodiscard]] QString cliProgram() const;
+    [[nodiscard]] QString currentConversationKey() const;
     void processBackendOutput();
     void sendBackendCommand(const QVariantMap &command);
     void setMedia(const QString &kind, bool enabled);
@@ -162,7 +217,8 @@ private:
     [[nodiscard]] bool isSelectedDirect(const QString &name) const;
     [[nodiscard]] bool isSelectedGroup(const QString &groupId) const;
     void recordActivity(bool isGroup, const QString &key, const QString &summary, bool unread);
-    void showNotification(const QString &title, const QString &body, bool ring);
+    void showNotification(const QString &title, const QString &body, bool ring,
+                          const QString &conversationKey = {});
     [[nodiscard]] bool conversationMuted(bool isGroup, const QString &key) const;
 
     QVariantList m_contacts;
@@ -170,14 +226,20 @@ private:
     QVariantList m_groups;
     QVariantList m_messages;
     QVariantList m_devices;
+    QVariantList m_mediaDevices;
+    QVariantList m_callParticipants;
+    QVariantList m_transfers;
     QVariantList m_searchResults;
     QVariantMap m_conversationPreferences;
     int m_selectedConversation = 0;
     QString m_inviteLink;
+    QString m_inviteQr;
     QString m_invitePreviewUrl;
     QString m_invitePreviewName;
     QString m_invitePreviewExpiry;
     QString m_deviceLink;
+    QString m_onboardingLink;
+    QString m_backupStatus;
     QString m_profileName = QStringLiteral("Tú");
     QString m_profileAvatar;
     bool m_callActive = false;
@@ -194,6 +256,7 @@ private:
     QByteArray m_backendBuffer;
     QString m_profilePath;
     QString m_lastError;
+    QString m_focusedMessageId;
     QString m_callId;
     QString m_pendingCallId;
     QString m_pendingCallContact;
@@ -203,7 +266,15 @@ private:
     QString m_heldCallContact;
     bool m_doNotDisturb = false;
     QString m_voiceMode = QStringLiteral("open");
+    QString m_pushToTalkShortcut = QStringLiteral("Ctrl+Space");
     QString m_startupInvite;
+    QString m_notificationConversationKey;
+    bool m_onboardingRequired = false;
+    bool m_archivedVisible = false;
+    bool m_secureStorageEnabled = false;
+    QString m_microphoneTestStatus;
+    int m_backendRestartAttempts = 0;
+    bool m_shuttingDown = false;
     bool m_pushToTalkPressed = false;
     bool m_updateAvailable = false;
     QString m_updateVersion;

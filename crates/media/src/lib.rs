@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
-use pptalk_protocol::{MediaDatagram, MediaKind, QualityMode, QualityProfile};
+use pptalk_protocol::{DeviceId, MediaDatagram, MediaKind, QualityMode, QualityProfile};
 
 #[derive(Debug)]
 pub struct JitterBuffer {
@@ -59,7 +59,7 @@ pub struct MediaDevice {
     pub is_default: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MediaDeviceKind {
     AudioInput,
     AudioOutput,
@@ -137,11 +137,22 @@ pub fn resolve_quality(
 #[async_trait]
 pub trait MediaEngine: Send + Sync {
     async fn capabilities(&self) -> Result<MediaCapabilities, MediaError>;
+    async fn select_device(
+        &self,
+        kind: MediaDeviceKind,
+        device_id: Option<String>,
+    ) -> Result<(), MediaError>;
     async fn publish(&self, kind: MediaKind, profile: QualityProfile) -> Result<(), MediaError>;
     async fn unpublish(&self, kind: MediaKind) -> Result<(), MediaError>;
     async fn stats(&self) -> Result<MediaStats, MediaError>;
     async fn next_rtp_packet(&self, kind: MediaKind) -> Result<Option<Vec<u8>>, MediaError>;
-    async fn receive_rtp_packet(&self, kind: MediaKind, packet: Vec<u8>) -> Result<(), MediaError>;
+    async fn receive_rtp_packet(
+        &self,
+        source: DeviceId,
+        kind: MediaKind,
+        packet: Vec<u8>,
+    ) -> Result<(), MediaError>;
+    async fn set_receive_volume(&self, source: DeviceId, volume: f64) -> Result<(), MediaError>;
     async fn stop_receiving(&self, kind: MediaKind) -> Result<(), MediaError>;
 }
 
@@ -149,7 +160,8 @@ pub trait MediaEngine: Send + Sync {
 /// streams terminate at an `appsink`; the call transport owns packet delivery.
 pub struct GstMediaEngine {
     pipelines: Mutex<Vec<(MediaKind, gst::Pipeline, gst_app::AppSink)>>,
-    receivers: Mutex<Vec<(MediaKind, gst::Pipeline, gst_app::AppSrc)>>,
+    receivers: Mutex<Vec<(DeviceId, MediaKind, gst::Pipeline, gst_app::AppSrc)>>,
+    selected_devices: Mutex<BTreeMap<MediaDeviceKind, String>>,
     stats: Mutex<MediaStats>,
 }
 
@@ -167,6 +179,7 @@ impl GstMediaEngine {
         Ok(Self {
             pipelines: Mutex::new(Vec::new()),
             receivers: Mutex::new(Vec::new()),
+            selected_devices: Mutex::new(BTreeMap::new()),
             stats: Mutex::new(MediaStats::default()),
         })
     }
@@ -180,6 +193,102 @@ impl GstMediaEngine {
             .iter()
             .copied()
             .find(|candidate| Self::has(candidate))
+    }
+
+    fn media_device_id(device: &gst::Device) -> String {
+        blake3::hash(format!("{}:{}", device.device_class(), device.display_name()).as_bytes())
+            .to_hex()
+            .to_string()
+    }
+
+    fn selected_device(&self, kind: MediaDeviceKind) -> Result<Option<gst::Device>, MediaError> {
+        let selected = self
+            .selected_devices
+            .lock()
+            .map_err(|_| MediaError::Poisoned)?
+            .get(&kind)
+            .cloned();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let monitor = gst::DeviceMonitor::new();
+        match kind {
+            MediaDeviceKind::AudioInput => {
+                monitor.add_filter(Some("Audio/Source"), None);
+            }
+            MediaDeviceKind::AudioOutput => {
+                monitor.add_filter(Some("Audio/Sink"), None);
+            }
+            MediaDeviceKind::Camera => {
+                monitor.add_filter(Some("Video/Source"), None);
+            }
+            MediaDeviceKind::Screen | MediaDeviceKind::Window => return Ok(None),
+        }
+        monitor
+            .start()
+            .map_err(|error| MediaError::Unavailable(error.to_string()))?;
+        let found = monitor
+            .devices()
+            .into_iter()
+            .find(|device| Self::media_device_id(device) == selected);
+        monitor.stop();
+        found.map(Some).ok_or_else(|| {
+            MediaError::Unavailable("selected media device is no longer available".into())
+        })
+    }
+
+    fn selected_capture_pipeline(
+        &self,
+        kind: MediaKind,
+        profile: &QualityProfile,
+    ) -> Result<Option<(gst::Pipeline, gst_app::AppSink)>, MediaError> {
+        let device_kind = match kind {
+            MediaKind::Voice | MediaKind::SystemAudio => MediaDeviceKind::AudioInput,
+            MediaKind::Camera => MediaDeviceKind::Camera,
+            MediaKind::Screen => return Ok(None),
+        };
+        let Some(device) = self.selected_device(device_kind)? else {
+            return Ok(None);
+        };
+        let source = device
+            .create_element(Some("capture_source"))
+            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+        let remainder = match kind {
+            MediaKind::Voice | MediaKind::SystemAudio => format!(
+                "audioconvert ! audioresample ! opusenc bitrate={} ! rtpopuspay pt=111 mtu=1100 ! appsink name=rtp_sink sync=false max-buffers=8 drop=true",
+                profile.bitrate_kbps.saturating_mul(1000)
+            ),
+            MediaKind::Camera => {
+                let encoder = Self::first_available(&[
+                    "nvh264enc",
+                    "vulkanh264enc",
+                    "openh264enc",
+                    "x264enc",
+                ])
+                .ok_or_else(|| MediaError::Unavailable("no H.264 encoder plugin".into()))?;
+                let encoder = Self::encoder_description(encoder, profile.bitrate_kbps);
+                format!(
+                    "videoconvert ! videoscale ! videorate ! video/x-raw,width={},height={},framerate={}/1 ! {encoder} ! h264parse ! rtph264pay config-interval=-1 pt=96 mtu=1100 ! appsink name=rtp_sink sync=false max-buffers=3 drop=true",
+                    profile.width, profile.height, profile.frames_per_second
+                )
+            }
+            MediaKind::Screen => unreachable!(),
+        };
+        let processing = gst::parse::bin_from_description(&remainder, true)
+            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+        let pipeline = gst::Pipeline::new();
+        pipeline
+            .add_many([&source, processing.upcast_ref()])
+            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+        source
+            .link(&processing)
+            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+        let sink = pipeline
+            .by_name("rtp_sink")
+            .ok_or_else(|| MediaError::Pipeline("pipeline has no RTP sink".into()))?
+            .downcast::<gst_app::AppSink>()
+            .map_err(|_| MediaError::Pipeline("RTP sink has the wrong type".into()))?;
+        Ok(Some((pipeline, sink)))
     }
 
     fn encoder_description(encoder: &str, bitrate_kbps: u32) -> String {
@@ -255,7 +364,7 @@ impl GstMediaEngine {
     fn receiver_description(kind: MediaKind) -> &'static str {
         match kind {
             MediaKind::Voice | MediaKind::SystemAudio => {
-                "appsrc name=rtp_source is-live=true format=time do-timestamp=true caps=\"application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000\" ! rtpjitterbuffer latency=60 drop-on-latency=true ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! autoaudiosink sync=false"
+                "appsrc name=rtp_source is-live=true format=time do-timestamp=true caps=\"application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000\" ! rtpjitterbuffer latency=60 drop-on-latency=true ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! volume name=participant_volume ! autoaudiosink sync=false"
             }
             MediaKind::Camera | MediaKind::Screen => {
                 "appsrc name=rtp_source is-live=true format=time do-timestamp=true caps=\"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000\" ! rtpjitterbuffer latency=80 drop-on-latency=true ! rtph264depay ! h264parse ! decodebin ! videoconvert ! autovideosink sync=false"
@@ -263,16 +372,50 @@ impl GstMediaEngine {
         }
     }
 
-    fn ensure_receiver(&self, kind: MediaKind) -> Result<gst_app::AppSrc, MediaError> {
+    fn ensure_receiver(
+        &self,
+        source_id: DeviceId,
+        kind: MediaKind,
+    ) -> Result<gst_app::AppSrc, MediaError> {
         let mut receivers = self.receivers.lock().map_err(|_| MediaError::Poisoned)?;
-        if let Some((_, _, source)) = receivers.iter().find(|(active, _, _)| *active == kind) {
+        if let Some((_, _, _, source)) = receivers
+            .iter()
+            .find(|(source, active, _, _)| *source == source_id && *active == kind)
+        {
             return Ok(source.clone());
         }
-        let element = gst::parse::launch(Self::receiver_description(kind))
-            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
-        let pipeline = element
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| MediaError::Pipeline("receiver parser returned a non-pipeline".into()))?;
+        let pipeline = if matches!(kind, MediaKind::Voice | MediaKind::SystemAudio) {
+            if let Some(device) = self.selected_device(MediaDeviceKind::AudioOutput)? {
+                let sink = device
+                    .create_element(Some("playback_sink"))
+                    .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                let processing = gst::parse::bin_from_description(
+                    "appsrc name=rtp_source is-live=true format=time do-timestamp=true caps=\"application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000\" ! rtpjitterbuffer latency=60 drop-on-latency=true ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! volume name=participant_volume",
+                    true,
+                )
+                .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                let pipeline = gst::Pipeline::new();
+                pipeline
+                    .add_many([processing.upcast_ref(), &sink])
+                    .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                processing
+                    .link(&sink)
+                    .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                pipeline
+            } else {
+                let element = gst::parse::launch(Self::receiver_description(kind))
+                    .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                element.downcast::<gst::Pipeline>().map_err(|_| {
+                    MediaError::Pipeline("receiver parser returned a non-pipeline".into())
+                })?
+            }
+        } else {
+            let element = gst::parse::launch(Self::receiver_description(kind))
+                .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+            element.downcast::<gst::Pipeline>().map_err(|_| {
+                MediaError::Pipeline("receiver parser returned a non-pipeline".into())
+            })?
+        };
         let source = pipeline
             .by_name("rtp_source")
             .ok_or_else(|| MediaError::Pipeline("receiver has no RTP source".into()))?
@@ -281,7 +424,7 @@ impl GstMediaEngine {
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|error| MediaError::Pipeline(error.to_string()))?;
-        receivers.push((kind, pipeline, source.clone()));
+        receivers.push((source_id, kind, pipeline, source.clone()));
         Ok(source)
     }
 }
@@ -312,9 +455,7 @@ impl MediaEngine for GstMediaEngine {
                     return None;
                 };
                 let label = device.display_name().to_string();
-                let id = blake3::hash(format!("{class}:{label}").as_bytes())
-                    .to_hex()
-                    .to_string();
+                let id = Self::media_device_id(&device);
                 let is_default = !seen_kinds.contains(&kind);
                 seen_kinds.push(kind);
                 Some(MediaDevice {
@@ -362,6 +503,23 @@ impl MediaEngine for GstMediaEngine {
         })
     }
 
+    async fn select_device(
+        &self,
+        kind: MediaDeviceKind,
+        device_id: Option<String>,
+    ) -> Result<(), MediaError> {
+        let mut selected = self
+            .selected_devices
+            .lock()
+            .map_err(|_| MediaError::Poisoned)?;
+        if let Some(device_id) = device_id {
+            selected.insert(kind, device_id);
+        } else {
+            selected.remove(&kind);
+        }
+        Ok(())
+    }
+
     async fn publish(&self, kind: MediaKind, profile: QualityProfile) -> Result<(), MediaError> {
         let profile = resolve_quality(
             &profile,
@@ -373,17 +531,23 @@ impl MediaEngine for GstMediaEngine {
             },
             0.0,
         )?;
-        let description = Self::pipeline_description(kind, &profile)?;
-        let element = gst::parse::launch(&description)
-            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
-        let pipeline = element
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| MediaError::Pipeline("pipeline parser returned a non-pipeline".into()))?;
-        let appsink = pipeline
-            .by_name("rtp_sink")
-            .ok_or_else(|| MediaError::Pipeline("pipeline has no RTP sink".into()))?
-            .downcast::<gst_app::AppSink>()
-            .map_err(|_| MediaError::Pipeline("RTP sink has the wrong type".into()))?;
+        let (pipeline, appsink) =
+            if let Some(selected) = self.selected_capture_pipeline(kind, &profile)? {
+                selected
+            } else {
+                let description = Self::pipeline_description(kind, &profile)?;
+                let element = gst::parse::launch(&description)
+                    .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                let pipeline = element.downcast::<gst::Pipeline>().map_err(|_| {
+                    MediaError::Pipeline("pipeline parser returned a non-pipeline".into())
+                })?;
+                let appsink = pipeline
+                    .by_name("rtp_sink")
+                    .ok_or_else(|| MediaError::Pipeline("pipeline has no RTP sink".into()))?
+                    .downcast::<gst_app::AppSink>()
+                    .map_err(|_| MediaError::Pipeline("RTP sink has the wrong type".into()))?;
+                (pipeline, appsink)
+            };
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|error| MediaError::Pipeline(error.to_string()))?;
@@ -443,19 +607,46 @@ impl MediaEngine for GstMediaEngine {
         .map_err(|error| MediaError::Pipeline(error.to_string()))?
     }
 
-    async fn receive_rtp_packet(&self, kind: MediaKind, packet: Vec<u8>) -> Result<(), MediaError> {
-        let source = self.ensure_receiver(kind)?;
+    async fn receive_rtp_packet(
+        &self,
+        source_id: DeviceId,
+        kind: MediaKind,
+        packet: Vec<u8>,
+    ) -> Result<(), MediaError> {
+        let receiver = self.ensure_receiver(source_id, kind)?;
         let buffer = gst::Buffer::from_mut_slice(packet);
-        source
+        receiver
             .push_buffer(buffer)
             .map_err(|error| MediaError::Pipeline(error.to_string()))?;
         Ok(())
     }
 
+    async fn set_receive_volume(&self, source_id: DeviceId, volume: f64) -> Result<(), MediaError> {
+        if !(0.0..=2.0).contains(&volume) {
+            return Err(MediaError::Unsupported(
+                "participant volume must be between 0 and 200 percent".into(),
+            ));
+        }
+        let receivers = self.receivers.lock().map_err(|_| MediaError::Poisoned)?;
+        for (source, kind, pipeline, _) in receivers.iter() {
+            if *source != source_id || !matches!(kind, MediaKind::Voice | MediaKind::SystemAudio) {
+                continue;
+            }
+            let element = pipeline
+                .by_name("participant_volume")
+                .ok_or_else(|| MediaError::Pipeline("receiver has no volume control".into()))?;
+            element.set_property("volume", volume);
+        }
+        Ok(())
+    }
+
     async fn stop_receiving(&self, kind: MediaKind) -> Result<(), MediaError> {
         let mut receivers = self.receivers.lock().map_err(|_| MediaError::Poisoned)?;
-        if let Some(index) = receivers.iter().position(|(active, _, _)| *active == kind) {
-            let (_, pipeline, source) = receivers.swap_remove(index);
+        while let Some(index) = receivers
+            .iter()
+            .position(|(_, active, _, _)| *active == kind)
+        {
+            let (_, _, pipeline, source) = receivers.swap_remove(index);
             source.end_of_stream().ok();
             pipeline
                 .set_state(gst::State::Null)
@@ -473,7 +664,7 @@ impl Drop for GstMediaEngine {
             }
         }
         if let Ok(receivers) = self.receivers.get_mut() {
-            for (_, pipeline, source) in receivers.drain(..) {
+            for (_, _, pipeline, source) in receivers.drain(..) {
                 source.end_of_stream().ok();
                 pipeline.set_state(gst::State::Null).ok();
             }

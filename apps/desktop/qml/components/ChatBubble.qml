@@ -14,6 +14,7 @@ Item {
     required property string replyTo
     required property string filePath
     required property bool localDeleteAllowed
+    property bool highlighted: false
     signal replyRequested(string messageId)
     signal editRequested(string messageId, string body)
     signal deleteRequested(string messageId)
@@ -32,7 +33,8 @@ Item {
         anchors.leftMargin: 22
         radius: 16
         color: root.own ? "#5C50C9" : "#24212D"
-        border.color: root.own ? "#756AE0" : "#34303F"
+        border.color: root.highlighted ? "#E8D978" : (root.own ? "#756AE0" : "#34303F")
+        border.width: root.highlighted ? 2 : 1
 
         Text {
             id: authorText

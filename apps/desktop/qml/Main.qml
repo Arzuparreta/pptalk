@@ -22,11 +22,61 @@ ApplicationWindow {
     property color accent: "#8173F2"
     property string replyMessageId: ""
     property string editMessageId: ""
+    property string contextBody: ""
+    property bool loadingDraft: false
+
+    function submitComposer() {
+        if (composer.text.trim().length === 0) return
+        if (window.editMessageId.length > 0)
+            App.editMessage(window.editMessageId, composer.text)
+        else if (window.replyMessageId.length > 0)
+            App.replyToMessage(window.replyMessageId, composer.text)
+        else
+            App.sendMessage(composer.text)
+        composer.clear()
+        App.saveDraft("")
+        window.editMessageId = ""
+        window.replyMessageId = ""
+        window.contextBody = ""
+    }
+
+    function mediaChoices(kind) {
+        const values = [{ "id": "", "label": "Predeterminado del sistema" }]
+        for (let i = 0; i < App.mediaDevices.length; ++i) {
+            if (App.mediaDevices[i].kind === kind) values.push(App.mediaDevices[i])
+        }
+        return values
+    }
+
+    function mediaChoiceIndex(kind, choices) {
+        const selected = App.selectedMediaDevice(kind)
+        for (let i = 0; i < choices.length; ++i) {
+            if (choices[i].id === selected) return i
+        }
+        return 0
+    }
 
     Connections {
         target: App
         function onInvitePreviewChanged() {
             if (App.invitePreviewName.length > 0) invitePreviewDialog.open()
+        }
+        function onConversationChanged() {
+            window.loadingDraft = true
+            composer.text = App.draft()
+            window.loadingDraft = false
+            window.replyMessageId = ""
+            window.editMessageId = ""
+            window.contextBody = ""
+        }
+        function onMessagesChanged() {
+            if (App.focusedMessageId.length === 0) return
+            for (let i = 0; i < App.messages.length; ++i) {
+                if (App.messages[i].messageId === App.focusedMessageId) {
+                    messageList.positionViewAtIndex(i, ListView.Center)
+                    return
+                }
+            }
         }
     }
 
@@ -93,16 +143,31 @@ ApplicationWindow {
                             Text { text: modelData.author; color: window.text; font.pixelSize: 11; font.weight: Font.DemiBold }
                             Text { text: modelData.body; color: window.muted; width: parent.width; elide: Text.ElideRight; font.pixelSize: 10 }
                         }
-                        MouseArea { id: searchMouse; anchors.fill: parent; hoverEnabled: true; onClicked: App.openSearchResult(modelData.conversationKey) }
+                        MouseArea {
+                            id: searchMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: App.openSearchResult(
+                                modelData.conversationKey, modelData.messageId)
+                        }
                     }
                 }
 
-                Text {
-                    text: "CONVERSACIONES"
-                    color: "#6F697A"
-                    font.pixelSize: 10
-                    font.letterSpacing: 1.2
+                RowLayout {
+                    Layout.fillWidth: true
                     Layout.topMargin: 6
+                    Text {
+                        text: App.archivedVisible ? "ARCHIVADAS Y ACTIVAS" : "CONVERSACIONES"
+                        color: "#6F697A"
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                    }
+                    Item { Layout.fillWidth: true }
+                    ToolButton {
+                        text: App.archivedVisible ? "Ocultar archivo" : "Ver archivo"
+                        font.pixelSize: 10
+                        onClicked: App.archivedVisible = !App.archivedVisible
+                    }
                 }
 
                 ListView {
@@ -179,6 +244,14 @@ ApplicationWindow {
             Layout.fillHeight: true
             color: "#131219"
 
+            DropArea {
+                anchors.fill: parent
+                onDropped: drop => {
+                    for (let i = 0; i < drop.urls.length; ++i) App.sendFile(drop.urls[i])
+                    drop.acceptProposedAction()
+                }
+            }
+
             ColumnLayout {
                 anchors.fill: parent
                 spacing: 0
@@ -220,14 +293,18 @@ ApplicationWindow {
                     Layout.preferredHeight: errorText.implicitHeight + 22
                     color: "#3A2028"
                     border.color: "#6F3542"
-                    Text {
-                        id: errorText
+                    RowLayout {
                         anchors.fill: parent
-                        anchors.margins: 11
-                        text: App.lastError
-                        color: "#FFD4DC"
-                        wrapMode: Text.Wrap
-                        font.pixelSize: 11
+                        anchors.margins: 8
+                        Text {
+                            id: errorText
+                            Layout.fillWidth: true
+                            text: App.lastError
+                            color: "#FFD4DC"
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 11
+                        }
+                        ToolButton { text: "Cerrar"; onClicked: App.dismissError() }
                     }
                 }
 
@@ -272,6 +349,11 @@ ApplicationWindow {
                             Text { text: "P2P mesh · cifrado extremo a extremo"; color: window.muted; font.pixelSize: 11 }
                         }
                         Item { Layout.fillWidth: true }
+                        Button {
+                            visible: App.callParticipants.length > 0
+                            text: "Personas · " + App.callParticipants.length
+                            onClicked: callParticipantsDialog.open()
+                        }
                         IconButton { glyph: App.microphoneEnabled ? "◉" : "×"; active: App.microphoneEnabled; onClicked: App.toggleMicrophone() }
                         IconButton { visible: App.callState === "connected"; glyph: "Ⅱ"; onClicked: App.holdCall() }
                         IconButton { glyph: "▣"; active: App.cameraEnabled; onClicked: App.toggleCamera() }
@@ -306,9 +388,21 @@ ApplicationWindow {
                         deleted: modelData.deleted
                         replyTo: modelData.replyTo
                         filePath: modelData.filePath
+                        highlighted: modelData.messageId === App.focusedMessageId
                         localDeleteAllowed: !App.conversationIsGroup
-                        onReplyRequested: id => { window.replyMessageId = id; window.editMessageId = ""; composer.forceActiveFocus() }
-                        onEditRequested: (id, currentBody) => { window.editMessageId = id; window.replyMessageId = ""; composer.text = currentBody; composer.forceActiveFocus() }
+                        onReplyRequested: id => {
+                            window.replyMessageId = id
+                            window.editMessageId = ""
+                            window.contextBody = body
+                            composer.forceActiveFocus()
+                        }
+                        onEditRequested: (id, currentBody) => {
+                            window.editMessageId = id
+                            window.replyMessageId = ""
+                            window.contextBody = currentBody
+                            composer.text = currentBody
+                            composer.forceActiveFocus()
+                        }
                         onDeleteRequested: id => App.deleteMessage(id)
                         onDeleteLocalRequested: id => App.deleteMessageLocal(id)
                         onOpenFileRequested: path => App.openMessageFile(path)
@@ -316,45 +410,128 @@ ApplicationWindow {
                     onCountChanged: positionViewAtEnd()
                 }
 
-                Rectangle {
+                ColumnLayout {
                     Layout.fillWidth: true
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
                     Layout.bottomMargin: 18
-                    Layout.preferredHeight: Math.max(58, composer.contentHeight + 25)
-                    radius: 17
-                    color: "#211E29"
-                    border.color: composer.activeFocus ? "#665B9A" : window.line
-                    RowLayout {
-                        anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 5
-                        IconButton { glyph: "+"; onClicked: attachmentDialog.open() }
-                        TextArea {
-                            id: composer
+                    spacing: 0
+
+                    Repeater {
+                        model: App.transfers
+                        delegate: Rectangle {
+                            required property var modelData
                             Layout.fillWidth: true
-                            placeholderText: window.editMessageId.length > 0 ? "Editar mensaje" : (window.replyMessageId.length > 0 ? "Escribe una respuesta" : "Escribe un mensaje")
-                            placeholderTextColor: "#746F80"
-                            color: window.text
-                            wrapMode: TextEdit.Wrap
-                            background: null
-                            Keys.onPressed: event => {
-                                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
-                                    if (window.editMessageId.length > 0) App.editMessage(window.editMessageId, text)
-                                    else if (window.replyMessageId.length > 0) App.replyToMessage(window.replyMessageId, text)
-                                    else App.sendMessage(text)
-                                    clear(); window.editMessageId = ""; window.replyMessageId = ""; event.accepted = true
+                            Layout.preferredHeight: 42
+                            color: "#1C2A26"
+                            radius: 10
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "Enviando " + modelData.fileName
+                                    color: window.text
+                                    elide: Text.ElideMiddle
+                                    font.pixelSize: 10
+                                }
+                                ProgressBar {
+                                    Layout.preferredWidth: 150
+                                    from: 0
+                                    to: 1
+                                    value: modelData.progress
+                                }
+                                Text {
+                                    text: Math.round(modelData.progress * 100) + "%"
+                                    color: window.muted
+                                    font.pixelSize: 10
+                                }
+                                Button {
+                                    text: "Cancelar"
+                                    flat: true
+                                    visible: modelData.cancelable
+                                    onClicked: App.cancelTransfer(modelData.id)
                                 }
                             }
                         }
-                        IconButton {
-                            glyph: "➤"; active: composer.text.trim().length > 0
-                            onClicked: {
-                                if (window.editMessageId.length > 0) App.editMessage(window.editMessageId, composer.text)
-                                else if (window.replyMessageId.length > 0) App.replyToMessage(window.replyMessageId, composer.text)
-                                else App.sendMessage(composer.text)
-                                composer.clear(); window.editMessageId = ""; window.replyMessageId = ""
+                    }
+
+                    Rectangle {
+                        visible: window.replyMessageId.length > 0 || window.editMessageId.length > 0
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: visible ? 46 : 0
+                        color: "#292534"
+                        radius: 12
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: (window.editMessageId.length > 0 ? "Editando: " : "Respondiendo a: ") +
+                                      window.contextBody
+                                color: window.muted
+                                elide: Text.ElideRight
+                                font.pixelSize: 11
+                            }
+                            ToolButton {
+                                text: "Cancelar"
+                                onClicked: {
+                                    window.replyMessageId = ""
+                                    window.editMessageId = ""
+                                    window.contextBody = ""
+                                    composer.text = App.draft()
+                                }
                             }
                         }
                     }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.max(58, composer.contentHeight + 25)
+                        radius: 17
+                        color: "#211E29"
+                        border.color: composer.activeFocus ? "#665B9A" : window.line
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 5
+                            IconButton { glyph: "+"; onClicked: attachmentDialog.open() }
+                            TextArea {
+                                id: composer
+                                Layout.fillWidth: true
+                                placeholderText: window.editMessageId.length > 0 ? "Editar mensaje" : (window.replyMessageId.length > 0 ? "Escribe una respuesta" : "Escribe un mensaje")
+                                placeholderTextColor: "#746F80"
+                                color: window.text
+                                wrapMode: TextEdit.Wrap
+                                background: null
+                                onTextChanged: {
+                                    if (!window.loadingDraft && window.editMessageId.length === 0)
+                                        draftTimer.restart()
+                                }
+                                Keys.onPressed: event => {
+                                    if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) &&
+                                        !(event.modifiers & Qt.ShiftModifier)) {
+                                        window.submitComposer()
+                                        event.accepted = true
+                                    }
+                                }
+                            }
+                            IconButton {
+                                glyph: "➤"
+                                active: composer.text.trim().length > 0
+                                onClicked: window.submitComposer()
+                            }
+                        }
+                    }
+                }
+
+                Timer {
+                    id: draftTimer
+                    interval: 450
+                    repeat: false
+                    onTriggered: App.saveDraft(composer.text)
                 }
             }
         }
@@ -364,6 +541,44 @@ ApplicationWindow {
         id: callMenu
         MenuItem { text: "Abrir sala sin llamar"; onTriggered: App.startCall(false) }
         MenuItem { text: App.conversationIsGroup ? "Llamar al grupo" : "Llamar"; onTriggered: App.startCall(true) }
+    }
+
+    Dialog {
+        id: callParticipantsDialog
+        title: "Personas en la llamada"
+        modal: true
+        anchors.centerIn: parent
+        width: 420
+        background: Rectangle { color: "#211E29"; radius: 18; border.color: "#403A4B" }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Repeater {
+                model: App.callParticipants
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Avatar { label: modelData.name; accent: "#8B7CFF"; size: 34 }
+                    Text {
+                        Layout.preferredWidth: 120
+                        text: modelData.name
+                        color: window.text
+                        elide: Text.ElideRight
+                    }
+                    Slider {
+                        Layout.fillWidth: true
+                        from: 0
+                        to: 2
+                        value: modelData.volume
+                        onMoved: App.setParticipantVolume(modelData.deviceId, value)
+                    }
+                    Text {
+                        text: Math.round(modelData.volume * 100) + "%"
+                        color: window.muted
+                        font.pixelSize: 10
+                    }
+                }
+            }
+        }
     }
 
     Menu {
@@ -386,11 +601,50 @@ ApplicationWindow {
             onTriggered: App.setCurrentContactPrivacy(!App.currentContactPrivacyHidden)
         }
         MenuItem {
+            text: App.currentContactVerified ? "Identidad verificada" : "Verificar identidad"
+            onTriggered: verifyContactDialog.open()
+        }
+        MenuItem {
             text: App.currentContactBlocked ? "Desbloquear" : "Bloquear"
             onTriggered: App.setCurrentContactBlocked(!App.currentContactBlocked)
         }
         MenuSeparator {}
         MenuItem { text: "Eliminar contacto"; onTriggered: removeContactDialog.open() }
+    }
+
+    Dialog {
+        id: verifyContactDialog
+        title: "Verificar identidad"
+        modal: true
+        anchors.centerIn: parent
+        width: 470
+        background: Rectangle { color: "#211E29"; radius: 18; border.color: "#403A4B" }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Text {
+                Layout.fillWidth: true
+                text: "Compara esta huella con " + App.conversationName +
+                      " por voz o en persona. Debéis ver exactamente los mismos bloques."
+                color: window.muted
+                wrapMode: Text.Wrap
+            }
+            TextArea {
+                Layout.fillWidth: true
+                readOnly: true
+                selectByMouse: true
+                text: App.currentContactFingerprint
+                wrapMode: TextEdit.Wrap
+                color: window.text
+            }
+            Button {
+                Layout.alignment: Qt.AlignRight
+                text: App.currentContactVerified ? "Quitar verificación" : "Coincide, marcar verificado"
+                onClicked: {
+                    App.setCurrentContactVerified(!App.currentContactVerified)
+                    verifyContactDialog.close()
+                }
+            }
+        }
     }
 
     Dialog {
@@ -439,18 +693,23 @@ ApplicationWindow {
                                                : "Sólo los administradores pueden cambiar la membresía.")
                 color: window.muted; wrapMode: Text.Wrap; Layout.fillWidth: true; font.pixelSize: 11
             }
-            TextField { id: membershipContact; Layout.fillWidth: true; placeholderText: "Nombre exacto del contacto" }
+            ComboBox {
+                id: membershipContact
+                Layout.fillWidth: true
+                model: App.directContacts
+                textRole: "name"
+            }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
-                Button { enabled: App.currentGroupOwned || App.currentGroupAdmin; text: "Expulsar"; onClicked: App.removeGroupMember(membershipContact.text) }
-                Button { enabled: App.currentGroupOwned || App.currentGroupAdmin; text: "Añadir"; onClicked: App.addGroupMember(membershipContact.text) }
+                Button { enabled: App.currentGroupOwned || App.currentGroupAdmin; text: "Expulsar"; onClicked: App.removeGroupMember(membershipContact.currentText) }
+                Button { enabled: App.currentGroupOwned || App.currentGroupAdmin; text: "Añadir"; onClicked: App.addGroupMember(membershipContact.currentText) }
             }
             RowLayout {
                 visible: App.currentGroupOwned
                 Layout.alignment: Qt.AlignRight
-                Button { text: "Quitar admin"; onClicked: App.setGroupAdministrator(membershipContact.text, false) }
-                Button { text: "Hacer admin"; onClicked: App.setGroupAdministrator(membershipContact.text, true) }
-                Button { text: "Transferir propiedad"; onClicked: App.transferGroupOwnership(membershipContact.text) }
+                Button { text: "Quitar admin"; onClicked: App.setGroupAdministrator(membershipContact.currentText, false) }
+                Button { text: "Hacer admin"; onClicked: App.setGroupAdministrator(membershipContact.currentText, true) }
+                Button { text: "Transferir propiedad"; onClicked: App.transferGroupOwnership(membershipContact.currentText) }
             }
             Rectangle { visible: App.currentGroupOwned; Layout.fillWidth: true; height: 1; color: window.line }
             Button {
@@ -476,8 +735,16 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: parent
         width: 450
+        height: Math.min(700, window.height - 48)
         background: Rectangle { color: "#211E29"; radius: 18; border.color: "#403A4B" }
-        contentItem: ColumnLayout {
+        contentItem: Flickable {
+            clip: true
+            contentWidth: width
+            contentHeight: settingsContent.implicitHeight
+            ScrollBar.vertical: ScrollBar {}
+            ColumnLayout {
+            id: settingsContent
+            width: parent.width
             spacing: 12
             Text { text: "Perfil"; color: window.text; font.pixelSize: 13; font.weight: Font.DemiBold }
             RowLayout {
@@ -506,7 +773,7 @@ ApplicationWindow {
             Loader {
                 active: App.platformSupportsAutostart
                 visible: active
-                source: active ? "components/WindowsAutostartSetting.qml" : ""
+                source: active ? "components/DesktopAutostartSetting.qml" : ""
             }
             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
             Text { text: "Micrófono al entrar"; color: window.text; font.pixelSize: 13; font.weight: Font.DemiBold }
@@ -518,8 +785,62 @@ ApplicationWindow {
             }
             Text {
                 visible: App.voiceMode === "push_to_talk"
-                text: "Durante una llamada, mantén Ctrl + Espacio para hablar."
+                text: "Durante una llamada, mantén el atajo para hablar mientras pptalk tenga el foco."
                 color: window.muted; font.pixelSize: 10
+            }
+            ComboBox {
+                visible: App.voiceMode === "push_to_talk"
+                Layout.fillWidth: true
+                model: [
+                    { "label": "Ctrl + Espacio", "value": "Ctrl+Space" },
+                    { "label": "Alt + Espacio", "value": "Alt+Space" },
+                    { "label": "F8", "value": "F8" }
+                ]
+                textRole: "label"
+                currentIndex: App.pushToTalkShortcut === "Alt+Space" ? 1 :
+                              (App.pushToTalkShortcut === "F8" ? 2 : 0)
+                onActivated: App.pushToTalkShortcut = model[currentIndex].value
+            }
+            Text { text: "Micrófono"; color: window.text; font.pixelSize: 11 }
+            ComboBox {
+                id: microphoneDevice
+                Layout.fillWidth: true
+                property var choices: window.mediaChoices("audio_input")
+                model: choices
+                textRole: "label"
+                currentIndex: window.mediaChoiceIndex("audio_input", choices)
+                onActivated: App.selectMediaDevice("audio_input", choices[currentIndex].id)
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Button { text: "Probar micrófono"; onClicked: App.testMicrophone() }
+                Text {
+                    Layout.fillWidth: true
+                    text: App.microphoneTestStatus
+                    color: App.microphoneTestStatus === "Micrófono listo." ? "#77D8B1" : window.muted
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 10
+                }
+            }
+            Text { text: "Altavoces o auriculares"; color: window.text; font.pixelSize: 11 }
+            ComboBox {
+                id: outputDevice
+                Layout.fillWidth: true
+                property var choices: window.mediaChoices("audio_output")
+                model: choices
+                textRole: "label"
+                currentIndex: window.mediaChoiceIndex("audio_output", choices)
+                onActivated: App.selectMediaDevice("audio_output", choices[currentIndex].id)
+            }
+            Text { text: "Cámara"; color: window.text; font.pixelSize: 11 }
+            ComboBox {
+                id: cameraDevice
+                Layout.fillWidth: true
+                property var choices: window.mediaChoices("camera")
+                model: choices
+                textRole: "label"
+                currentIndex: window.mediaChoiceIndex("camera", choices)
+                onActivated: App.selectMediaDevice("camera", choices[currentIndex].id)
             }
             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
             Text { text: "Calidad de cámara y pantalla"; color: window.text; font.pixelSize: 13; font.weight: Font.DemiBold }
@@ -564,6 +885,51 @@ ApplicationWindow {
                     }
                 }
             }
+            Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
+            Text { text: "Protección local"; color: window.text; font.pixelSize: 13; font.weight: Font.DemiBold }
+            Text {
+                Layout.fillWidth: true
+                text: App.secureStorageEnabled
+                    ? "La clave del historial está protegida por el almacén seguro del sistema."
+                    : "La clave del historial sigue dentro del perfil. Puedes moverla al almacén seguro del sistema sin cambiar tu identidad."
+                color: App.secureStorageEnabled ? "#77D8B1" : window.muted
+                wrapMode: Text.Wrap
+                font.pixelSize: 10
+            }
+            Button {
+                text: App.secureStorageEnabled ? "Protección activada" : "Proteger con el sistema"
+                enabled: !App.secureStorageEnabled
+                onClicked: App.protectLocalSecrets()
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
+            Text { text: "Copia cifrada de identidad"; color: window.text; font.pixelSize: 13; font.weight: Font.DemiBold }
+            Text {
+                Layout.fillWidth: true
+                text: "Guarda tu identidad, contactos y grupos en un archivo protegido. El historial y los adjuntos permanecen en este equipo."
+                color: window.muted
+                wrapMode: Text.Wrap
+                font.pixelSize: 10
+            }
+            TextField {
+                id: backupPassphrase
+                Layout.fillWidth: true
+                echoMode: TextInput.Password
+                placeholderText: "Frase para la copia (mínimo 10 caracteres)"
+            }
+            Button {
+                text: "Guardar copia cifrada"
+                enabled: backupPassphrase.text.length >= 10
+                onClicked: backupExportDialog.open()
+            }
+            Text {
+                visible: App.backupStatus.length > 0
+                Layout.fillWidth: true
+                text: App.backupStatus
+                color: "#77D8B1"
+                wrapMode: Text.Wrap
+                font.pixelSize: 10
+            }
+            }
         }
     }
 
@@ -575,8 +941,27 @@ ApplicationWindow {
         onAccepted: App.updateProfile(profileName.text, selectedFile)
     }
 
+    FileDialog {
+        id: backupExportDialog
+        title: "Guardar copia cifrada"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["Copias de pptalk (*.pptalk-backup)"]
+        onAccepted: {
+            App.exportIdentityBackup(selectedFile, backupPassphrase.text)
+            backupPassphrase.clear()
+        }
+    }
+
     Dialog {
         id: groupDialog
+        property var selectedNames: []
+        function toggleMember(name, selected) {
+            let next = selectedNames.slice()
+            const index = next.indexOf(name)
+            if (selected && index < 0) next.push(name)
+            if (!selected && index >= 0) next.splice(index, 1)
+            selectedNames = next
+        }
         title: "Nuevo grupo privado"
         modal: true
         anchors.centerIn: parent
@@ -585,12 +970,35 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 12
             TextField { id: groupName; Layout.fillWidth: true; placeholderText: "Nombre del grupo" }
-            TextField { id: groupMembers; Layout.fillWidth: true; placeholderText: "Contactos, separados por comas" }
+            Text { text: "Elige participantes"; color: window.text; font.weight: Font.DemiBold }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(180, App.directContacts.length * 42)
+                ColumnLayout {
+                    width: parent.width
+                    Repeater {
+                        model: App.directContacts
+                        delegate: CheckBox {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            text: modelData.name
+                            checked: groupDialog.selectedNames.indexOf(modelData.name) >= 0
+                            onToggled: groupDialog.toggleMember(modelData.name, checked)
+                        }
+                    }
+                }
+            }
             Text { text: "Máximo 16 miembros en el chat y 8 en llamada. Los nuevos miembros no reciben el historial anterior."; color: window.muted; wrapMode: Text.Wrap; Layout.fillWidth: true; font.pixelSize: 11 }
             Button {
-                text: "Crear con MLS"
+                text: "Crear grupo privado"
+                enabled: groupName.text.trim().length > 0 && groupDialog.selectedNames.length > 0
                 Layout.alignment: Qt.AlignRight
-                onClicked: { App.createGroup(groupName.text, groupMembers.text); groupDialog.close() }
+                onClicked: {
+                    App.createGroup(groupName.text, groupDialog.selectedNames.join(","))
+                    groupName.clear()
+                    groupDialog.selectedNames = []
+                    groupDialog.close()
+                }
             }
         }
     }
@@ -606,6 +1014,14 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 14
             Text { text: "Este enlace caduca y solo puede usarse una vez."; color: window.muted; font.pixelSize: 12 }
+            Image {
+                visible: App.inviteQr.length > 0
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: 180
+                Layout.preferredHeight: 180
+                source: App.inviteQr
+                fillMode: Image.PreserveAspectFit
+            }
             TextField { Layout.fillWidth: true; readOnly: true; text: App.inviteLink; color: window.text; background: Rectangle { color: "#141219"; radius: 10; border.color: window.line } }
             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
             Text { text: "O pega una invitación que te hayan enviado:"; color: window.muted; font.pixelSize: 12 }
@@ -646,5 +1062,11 @@ ApplicationWindow {
             }
         }
         onAccepted: { App.confirmInvite(); inviteDialog.close() }
+    }
+
+    Onboarding {
+        anchors.fill: parent
+        visible: App.onboardingRequired
+        z: 1000
     }
 }

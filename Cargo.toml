@@ -21,12 +21,13 @@ repository = "https://github.com/Arzuparreta/pptalk"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
+argon2 = "0.5.3"
 async-trait = "0.1.89"
 axum = "0.8.8"
 base64 = "0.22.1"
 blake3 = "1.8.2"
 bytes = "1.10.1"
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 ciborium = "0.2.2"
 clap = { version = "4.5.50", features = ["derive", "env"] }
 directories = "6.0.0"
@@ -39,6 +40,7 @@ iroh = { version = "1.0.3", default-features = false, features = ["tls-ring", "p
 openmls = { git = "https://github.com/openmls/openmls.git", rev = "65396d8ed3121506d1b9c7d0e6ec9fce1bed486d", features = ["openmls_rust_crypto"] }
 openmls_basic_credential = { git = "https://github.com/openmls/openmls.git", rev = "65396d8ed3121506d1b9c7d0e6ec9fce1bed486d" }
 openmls_rust_crypto = { git = "https://github.com/openmls/openmls.git", rev = "65396d8ed3121506d1b9c7d0e6ec9fce1bed486d" }
+qrcode = { version = "0.14.1", default-features = false }
 rand = "0.8.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.39.0", features = ["bundled-sqlcipher-vendored-openssl"] }

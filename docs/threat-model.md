@@ -28,9 +28,9 @@ salida deben estar limpios. Malware con acceso a una sesión desbloqueada puede
 leer mensajes, capturar pantalla o usar el micrófono.
 
 Una invitación demuestra posesión del enlace, no la identidad civil de quien lo
-envió. La interfaz actual aún no muestra una comparación de huellas: cuando esa
-verificación sea necesaria, no confíes únicamente en el nombre visible ni uses
-esta versión para una relación de alto riesgo.
+envió. Compara la huella completa que muestra la conversación por otro canal.
+Marcarla como verificada registra tu comprobación local; no crea una autoridad
+central ni certifica por sí solo quién controla el otro dispositivo.
 
 ## Pérdida o robo de un dispositivo
 
@@ -40,18 +40,17 @@ estado antiguo y los grupos controlados cambian de época MLS.
 La revocación no borra los archivos que el equipo robado ya tuviera ni vence a
 malware que extrajo claves antes de ser revocado.
 
-Si pierdes todos los dispositivos, no hay recuperación central. Esa es la
-contrapartida de no mantener una autoridad con capacidad de restablecer tu
-identidad.
+Si pierdes todos los dispositivos, no hay recuperación central. Una copia local
+cifrada permite restaurar la identidad, pero quien obtenga el archivo y su frase
+también puede controlarla.
 
 ## Protección local actual
 
-La conversación está en SQLCipher, pero la clave de esa base reside actualmente
-junto al perfil del dispositivo, protegido con permisos de usuario. Para esta
-versión se asume cifrado completo de disco y una sesión de escritorio bloqueada.
-
-Mover las semillas y claves al almacén seguro del sistema operativo sigue siendo
-necesario antes de considerar el cliente endurecido.
+La conversación está en SQLCipher. De forma predeterminada, su clave reside junto
+al perfil para mantener compatibilidad. **Protección local** la mueve al almacén
+seguro del sistema y escribe ceros en el perfil solo después de comprobar que
+puede recuperarla. Las demás semillas del dispositivo siguen requiriendo cifrado
+completo de disco y una sesión de escritorio bloqueada.
 
 ## Fuera de alcance actualmente
 

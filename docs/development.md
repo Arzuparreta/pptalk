@@ -28,6 +28,16 @@ cargo test --workspace --locked
 python3 scripts/smoke-e2e.py
 ```
 
+Para comprobar el presupuesto de reposo del cliente y el daemon en Linux:
+
+```sh
+./scripts/resource-budget.sh
+```
+
+El gate espera como máximo 180 MiB combinados y un 2 % de un núcleo después del
+calentamiento. Se pueden ajustar temporalmente con
+`PPTALK_IDLE_RSS_KB_LIMIT` y `PPTALK_IDLE_CPU_LIMIT`.
+
 Para revisar dependencias conocidas como vulnerables:
 
 ```sh

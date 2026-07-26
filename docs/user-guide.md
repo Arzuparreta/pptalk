@@ -2,9 +2,14 @@
 
 ## La primera vez
 
-Al abrir pptalk se crea una identidad en el dispositivo. No tienes que elegir
-usuario global, correo ni contraseña. El nombre inicial se toma del usuario del
-sistema y solo sirve para que tus contactos te reconozcan.
+Al abrir pptalk por primera vez puedes:
+
+- escribir un nombre y pulsar **Crear identidad local**;
+- abrir **Vincular equipo** y pegar un enlace creado en otro dispositivo;
+- abrir **Restaurar copia** y elegir una copia cifrada de tu identidad.
+
+No tienes que elegir un usuario global, correo ni contraseña. El nombre solo
+sirve para que tus contactos te reconozcan.
 
 La ventana tiene dos zonas:
 
@@ -20,7 +25,7 @@ superior izquierda.
 
 1. Abre el botón **+** superior.
 2. pptalk crea un enlace que empieza por `pptalk://contact/`.
-3. Pulsa **Copiar enlace**.
+3. Enseña el QR o pulsa **Copiar enlace**.
 4. Envíalo a la persona por un medio de confianza.
 5. Mantén pptalk abierto hasta que la otra persona lo acepte.
 
@@ -34,8 +39,8 @@ superior izquierda.
 
 El contacto aparecerá en la lista. La invitación caduca y es de un solo uso. Si
 ha expirado, el remitente debe generar otra. Envíala por un canal de confianza:
-la interfaz todavía no ofrece una pantalla para comparar huellas, así que esta
-versión no es adecuada si necesitas verificar una identidad de alto riesgo.
+Después de conectar, abre **⋯ → Verificar identidad**. Compara todos los bloques
+de la huella por voz o en persona y pulsa **Coincide, marcar verificado**.
 
 ## Mensajes y archivos
 
@@ -47,7 +52,9 @@ Selecciona un contacto o grupo en la columna izquierda.
 - El botón **+** situado junto al mensaje abre el selector de archivos.
 
 Los archivos se cifran antes de salir del dispositivo. Si el receptor no está
-disponible, pptalk intenta entregarlos cuando vuelva a existir una ruta.
+disponible, pptalk intenta entregarlos cuando vuelva a existir una ruta. Durante
+un envío directo puedes pulsar **Cancelar** para detener los fragmentos que aún
+no se hayan enviado. El límite por archivo es de 512 MiB.
 
 Los contactos y los mensajes se recuerdan al cerrar la aplicación. Pulsa con el
 botón derecho sobre un mensaje para **Responder**, **Editar** o **Eliminar para
@@ -55,8 +62,15 @@ todos**. La búsqueda de la columna izquierda busca texto en todo el historial
 local. “Entregado” confirma que el otro dispositivo guardó el mensaje; pptalk no
 envía confirmaciones de lectura.
 
+pptalk conserva un borrador distinto para cada conversación. Al responder o
+editar aparece una franja que permite cancelar la acción. Para enviar archivos
+puedes pulsar el **+** o arrastrarlos sobre la conversación; durante el envío se
+muestra el progreso.
+
 El menú **⋯** de un contacto permite fijar, archivar o silenciar la conversación,
-ocultar tu presencia para esa persona, bloquearla o eliminarla. El historial
+ocultar tu presencia para esa persona, bloquearla o eliminarla. **Archivar**
+retira la conversación de la lista normal; pulsa **Ver archivo** para recuperarla.
+El historial
 local no se borra al eliminar un contacto. Para recuperarlo como contacto hace
 falta aceptar una invitación nueva.
 
@@ -70,8 +84,8 @@ intermedia.
 1. Añade primero a cada participante como contacto.
 2. Pulsa **◫** en la parte superior izquierda.
 3. Escribe un nombre para el grupo.
-4. Escribe los nombres exactos de los contactos, separados por comas.
-5. Pulsa **Crear con MLS**.
+4. Marca los contactos que quieres incluir.
+5. Pulsa **Crear grupo privado**.
 
 MLS es el sistema que cambia las claves cifradas del grupo cuando entra o sale
 alguien; no tienes que configurarlo manualmente.
@@ -98,6 +112,10 @@ Durante la llamada puedes activar o desactivar:
 - micrófono: botón **◉**;
 - cámara: botón **▣**;
 - compartir pantalla: botón **↗**.
+
+Pulsa **Personas** para ver quién está conectado y ajustar su volumen. En
+**Ajustes** puedes elegir micrófono, auriculares y cámara, y pulsar **Probar
+micrófono** antes de llamar.
 
 El micrófono, la cámara y la pantalla permanecen apagados mientras suena la
 llamada; el micrófono se activa al aceptar. Si nadie responde, la llamada termina
@@ -129,11 +147,9 @@ En el dispositivo ya autorizado:
 3. pulsa **Generar enlace (10 min)** y después **Copiar**;
 4. transfiere el enlace al dispositivo nuevo por un canal de confianza.
 
-En el dispositivo nuevo, antes de que tenga otro perfil, inicia pptalk así:
-
-```sh
-PPTALK_DEVICE_LINK='pptalk://device/v1#…' ./scripts/dev.sh start
-```
+En el dispositivo nuevo abre pptalk, elige **Vincular equipo**, pega el enlace y
+pulsa **Vincular este equipo**. También puedes abrir el enlace directamente si
+el sistema ya ha registrado el protocolo `pptalk://`.
 
 El enlace caduca a los diez minutos. En **Dispositivos autorizados** puedes
 revocar cualquier dispositivo salvo el que estás usando. La revocación no borra
@@ -148,18 +164,31 @@ Una identidad admite como máximo cinco dispositivos activos.
 
 **No molestar** es manual y no caduca solo. **Micrófono al entrar** permite elegir
 **Micrófono abierto** o **Pulsar para hablar**. En Windows
-aparece **Abrir pptalk al iniciar Windows**, desactivado de forma predeterminada;
-al activarlo abre la ventana principal. Ese ajuste no existe en Linux.
-En **Pulsar para hablar**, mantén `Ctrl + Espacio` durante la llamada. Cuando hay
+aparece **Abrir pptalk al iniciar sesión**, desactivado de forma predeterminada;
+también está disponible en escritorios Linux. Al iniciar sesión, pptalk queda
+minimizado en la bandeja.
+En **Pulsar para hablar**, elige `Ctrl + Espacio`, `Alt + Espacio` o `F8`. El
+atajo funciona mientras pptalk tiene el foco. Cuando hay
 una versión publicada más nueva, **Ajustes** muestra su descarga; los paquetes
 AUR se actualizan con el gestor de paquetes.
 
+## Proteger y copiar la identidad
+
+En **Ajustes → Protección local**, pulsa **Proteger con el sistema** para mover la
+clave del historial al almacén seguro de Windows o Linux. pptalk verifica que
+puede recuperarla antes de eliminarla del archivo de perfil.
+
+En **Copia cifrada de identidad**, escribe una frase de al menos diez caracteres
+y pulsa **Guardar copia cifrada**. La copia incluye identidad, contactos y grupos,
+pero no el historial ni los adjuntos. Para restaurarla en una instalación nueva,
+abre **Restaurar copia**, selecciona el archivo e introduce la misma frase.
+
 ## Pérdida del dispositivo
 
-No existe recuperación central ni una copia de seguridad soportada por la app.
-Si pierdes todos los dispositivos, pierdes la identidad. Protege la sesión del
-sistema y su disco; no envíes `profile.json`, bases de datos ni enlaces de
-dispositivo a nadie que no deba controlar tu identidad.
+No existe recuperación central. Si pierdes todos los dispositivos y también la
+copia cifrada, pierdes la identidad. Protege la sesión del sistema y su disco;
+no envíes `profile.json`, bases de datos, copias, frases ni enlaces de dispositivo
+a nadie que no deba controlar tu identidad.
 
 ## Problemas comunes
 

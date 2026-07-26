@@ -57,10 +57,17 @@ misma identidad sincronizan el texto de chats directos, pero no adjuntos
 antiguos. Al revocarlo, deja de recibir envíos y los grupos controlados avanzan a
 claves que ya no lo incluyen.
 
+El perfil conserva compatibilidad con instalaciones anteriores. Cuando el
+usuario activa **Protección local**, la clave SQLCipher se escribe y se lee de
+vuelta desde el almacén seguro del sistema antes de sustituirla por ceros en
+`profile.json`. La copia de identidad usa Argon2id y XChaCha20-Poly1305; se
+restaura únicamente sobre una ruta de perfil nueva.
+
 Las invitaciones de contacto contienen una capacidad de un solo uso, una prueba
-firmada de dirección y una caducidad. La interfaz actual confía en el canal por
-el que se comparte la invitación; aún falta una pantalla de comparación de
-huellas para verificaciones de mayor riesgo.
+firmada de dirección y una caducidad. La interfaz deriva una huella estable de la
+identidad y conserva por separado la comprobación manual del usuario; aceptar
+una prueba criptográfica válida no marca automáticamente a la persona como
+verificada.
 
 ## Conversaciones y sincronización
 
@@ -106,7 +113,15 @@ y pantalla viajan como RTP sobre canales de transporte separados de los
 mensajes.
 
 Las llamadas de grupo usan una malla entre participantes y tienen un límite duro
-de ocho personas.
+de ocho personas. Cada emisor remoto tiene un pipeline de recepción propio, lo
+que permite controlar su volumen sin mezclar antes las señales. Los dispositivos
+de entrada, salida y cámara se crean desde `GstDevice`; si no se elige uno se usa
+el predeterminado del sistema.
+
+El cliente de escritorio usa una única instancia. Una segunda apertura reenvía
+el enlace `pptalk://` a la primera, que abre la invitación o trae la ventana al
+frente. Si el daemon local termina de forma inesperada, la interfaz lo reinicia
+con espera acotada.
 
 ## Mapa del código
 

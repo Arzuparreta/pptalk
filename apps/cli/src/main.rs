@@ -1,19 +1,25 @@
 use std::{
     collections::BTreeSet,
+    fmt::Write as FmtWrite,
     fs::OpenOptions,
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
 };
 
 use anyhow::{Context, Result, bail};
+use argon2::Argon2;
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
 };
 use clap::{Parser, Subcommand};
 use pptalk_core::{
@@ -21,7 +27,7 @@ use pptalk_core::{
     IdentityEvent, IdentityEventKind, IdentityLog, decrypt_blob, encrypt_blob, sign_invite,
     verify_invite,
 };
-use pptalk_media::{GstMediaEngine, MediaEngine};
+use pptalk_media::{GstMediaEngine, MediaDeviceKind, MediaEngine};
 use pptalk_mls::{MlsClient, MlsError};
 use pptalk_network::{PeerAddress, PeerNetwork};
 use pptalk_protocol::{
@@ -33,6 +39,7 @@ use pptalk_protocol::{
 use pptalk_storage::{
     CallEventRecord, ConversationSettings, DatabaseKey, DirectMessageRecord, Store,
 };
+use qrcode::{QrCode, types::Color};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
@@ -40,6 +47,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use url::Url;
 
 static LAST_OUTBOX_TIME_MS: AtomicI64 = AtomicI64::new(0);
+const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 
 macro_rules! daemon_or_continue {
     ($expression:expr) => {
@@ -132,6 +140,24 @@ enum Command {
         #[arg(long, default_value = "revoked by user")]
         reason: String,
     },
+    /// Export an encrypted local identity backup.
+    ExportBackup {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, env = "PPTALK_BACKUP_PASSPHRASE", hide_env_values = true)]
+        passphrase: String,
+    },
+    /// Restore a new profile from an encrypted identity backup.
+    ImportBackup {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, env = "PPTALK_BACKUP_PASSPHRASE", hide_env_values = true)]
+        passphrase: String,
+    },
     /// Run the long-lived JSON-lines backend used by the native desktop client.
     Daemon {
         #[arg(long)]
@@ -149,6 +175,8 @@ struct Profile {
     device_secret: [u8; 32],
     network_secret: [u8; 32],
     database_key: [u8; 32],
+    #[serde(default)]
+    database_key_in_keyring: bool,
     #[serde(default)]
     mls_key_package: Vec<u8>,
     #[serde(default)]
@@ -175,6 +203,8 @@ struct Contact {
     mailbox_urls: Vec<Url>,
     shared_secret: [u8; 32],
     verified: bool,
+    #[serde(default)]
+    manually_verified: bool,
     #[serde(default)]
     mls_key_package: Vec<u8>,
     #[serde(default)]
@@ -325,6 +355,51 @@ struct IncomingFile {
     chunks: std::collections::BTreeMap<u32, Vec<u8>>,
 }
 
+#[derive(Debug)]
+struct TransferControl {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl TransferControl {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
+struct DirectTransferProgress<'a> {
+    id: &'a str,
+    control: &'a TransferControl,
+    device_index: usize,
+    device_count: usize,
+}
+
+struct QueuedFilePacket {
+    conversation_id: ConversationId,
+    event_id: EventId,
+    recipient: DeviceId,
+    envelope: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 struct ActiveCall {
     id: CallId,
@@ -388,6 +463,16 @@ async fn main() -> Result<()> {
             device_id,
             reason,
         } => revoke_device(&profile, &device_id, &reason),
+        Command::ExportBackup {
+            profile,
+            output,
+            passphrase,
+        } => export_identity_backup(&profile, &output, &passphrase),
+        Command::ImportBackup {
+            profile,
+            input,
+            passphrase,
+        } => import_identity_backup(&profile, &input, &passphrase),
         Command::Daemon { profile } => Box::pin(daemon(&profile)).await,
     }
 }
@@ -413,14 +498,35 @@ enum DaemonCommand {
         identity_id: String,
         hide_presence: bool,
     },
+    SetContactVerified {
+        identity_id: String,
+        verified: bool,
+    },
     SetConversationPreference {
         conversation_key: String,
         pinned: bool,
         archived: bool,
         muted: bool,
     },
+    RecordConversationActivity {
+        conversation_key: String,
+        summary: String,
+        unread: bool,
+        clear_unread: bool,
+    },
     Groups,
     Devices,
+    MediaCapabilities,
+    TestMicrophone,
+    SelectMediaDevice {
+        kind: String,
+        device_id: Option<String>,
+    },
+    ExportBackup {
+        path: PathBuf,
+        passphrase: String,
+    },
+    ProtectLocalSecrets,
     SetMailbox {
         url: Option<Url>,
     },
@@ -468,6 +574,9 @@ enum DaemonCommand {
     SendFile {
         contact: String,
         path: PathBuf,
+    },
+    CancelTransfer {
+        transfer_id: String,
     },
     CreateGroup {
         name: String,
@@ -548,6 +657,11 @@ enum DaemonCommand {
         enabled: bool,
         profile: Option<QualityProfile>,
     },
+    SetParticipantVolume {
+        call_id: String,
+        device_id: String,
+        volume: f64,
+    },
     Shutdown,
 }
 
@@ -602,6 +716,7 @@ fn initialize(path: &Path, name: String, mailbox_url: Option<Url>) -> Result<()>
         device_secret: key.secret_bytes(),
         network_secret,
         database_key: DatabaseKey::generate().expose_for_profile(),
+        database_key_in_keyring: false,
         mls_key_package: vec![],
         mailbox_url,
         contacts: vec![],
@@ -697,6 +812,7 @@ fn accept_invite(path: &Path, url: &Url) -> Result<()> {
             mailbox_urls: invite.reachability.mailbox_candidates,
             shared_secret: invite.one_time_secret,
             verified: true,
+            manually_verified: false,
             mls_key_package: vec![],
             identity_events: vec![],
             blocked: false,
@@ -758,6 +874,7 @@ async fn listen(path: &Path) -> Result<()> {
                                 mailbox_urls: packet.mailbox_urls.clone(),
                                 shared_secret,
                                 verified: true,
+                                manually_verified: false,
                                 mls_key_package: packet.mls_key_package.clone(),
                                 identity_events: packet.identity_events.clone(),
                                 blocked: false,
@@ -797,6 +914,7 @@ async fn listen(path: &Path) -> Result<()> {
                                         mailbox_urls: packet.mailbox_urls.clone(),
                                         shared_secret,
                                         verified: true,
+                                        manually_verified: false,
                                         mls_key_package: packet.mls_key_package.clone(),
                                         identity_events: packet.identity_events.clone(),
                                         blocked: false,
@@ -844,6 +962,12 @@ async fn daemon(path: &Path) -> Result<()> {
     let mut active_call: Option<ActiveCall> = None;
     let mut held_call: Option<ActiveCall> = None;
     let mut media_tasks: Vec<(MediaKind, tokio::task::JoinHandle<()>)> = Vec::new();
+    let (transfer_done_sender, mut transfer_done_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut transfer_tasks = std::collections::BTreeMap::<
+        String,
+        (Arc<TransferControl>, tokio::task::JoinHandle<()>),
+    >::new();
     let mut incoming_files = std::collections::BTreeMap::<[u8; 32], IncomingFile>::new();
     let mls_snapshot_id = ConversationId::from_bytes([0x6d; 32]);
     let mut mls = match store.load_mls_state(mls_snapshot_id)? {
@@ -870,6 +994,7 @@ async fn daemon(path: &Path) -> Result<()> {
         "identity_id":profile.identity_id,
         "name":profile.name,
         "avatar":profile.avatar,
+        "secure_storage":profile.database_key_in_keyring,
         "address":network.local_address()
     }))?;
     emit_contacts(&profile)?;
@@ -1005,6 +1130,22 @@ async fn daemon(path: &Path) -> Result<()> {
                             emit_contacts(&profile)?;
                         }
                     }
+                    DaemonCommand::SetContactVerified { identity_id, verified } => {
+                        let identity = daemon_or_continue!(
+                            identity_id.parse::<IdentityId>().context("invalid identity id")
+                        );
+                        let mut changed = false;
+                        for contact in profile.contacts.iter_mut()
+                            .filter(|contact| contact.identity_id == identity)
+                        {
+                            contact.manually_verified = verified;
+                            changed = true;
+                        }
+                        if changed {
+                            save_profile(path, &profile)?;
+                            emit_contacts(&profile)?;
+                        }
+                    }
                     DaemonCommand::SetConversationPreference { conversation_key, pinned, archived, muted } => {
                         if conversation_key.trim().is_empty() || conversation_key.len() > 128 {
                             emit_json(&serde_json::json!({"event":"error", "message":"invalid conversation key"}))?;
@@ -1024,8 +1165,147 @@ async fn daemon(path: &Path) -> Result<()> {
                         })?;
                         emit_conversation_settings(&store)?;
                     }
+                    DaemonCommand::RecordConversationActivity {
+                        conversation_key, summary, unread, clear_unread
+                    } => {
+                        if conversation_key.trim().is_empty() || conversation_key.len() > 128 {
+                            continue;
+                        }
+                        let previous = store.load_conversation_settings()?.into_iter()
+                            .find(|settings| settings.conversation_key == conversation_key);
+                        let unread_count = if clear_unread {
+                            0
+                        } else {
+                            previous.as_ref().map_or(u32::from(unread), |settings| {
+                                settings.unread_count.saturating_add(u32::from(unread))
+                            })
+                        };
+                        store.save_conversation_settings(&ConversationSettings {
+                            conversation_key,
+                            pinned: previous.as_ref().is_some_and(|settings| settings.pinned),
+                            archived: previous.as_ref().is_some_and(|settings| settings.archived),
+                            muted_until_unix: previous.as_ref().and_then(|settings| settings.muted_until_unix),
+                            unread_count,
+                            last_summary: if summary.is_empty() {
+                                previous.as_ref().map_or_else(String::new, |settings| settings.last_summary.clone())
+                            } else {
+                                summary
+                            },
+                            last_activity_unix: if clear_unread && previous.is_some() {
+                                previous.as_ref().map_or(0, |settings| settings.last_activity_unix)
+                            } else {
+                                OffsetDateTime::now_utc().unix_timestamp()
+                            },
+                            notification_preview: previous.as_ref().is_none_or(|settings| settings.notification_preview),
+                        })?;
+                        emit_conversation_settings(&store)?;
+                    }
                     DaemonCommand::Groups => emit_groups(&profile)?,
                     DaemonCommand::Devices => emit_devices(&profile)?,
+                    DaemonCommand::MediaCapabilities => {
+                        let capabilities = daemon_or_continue!(media.capabilities().await);
+                        let devices = capabilities.devices.into_iter().map(|device| {
+                            let kind = match device.kind {
+                                MediaDeviceKind::AudioInput => "audio_input",
+                                MediaDeviceKind::AudioOutput => "audio_output",
+                                MediaDeviceKind::Camera => "camera",
+                                MediaDeviceKind::Screen => "screen",
+                                MediaDeviceKind::Window => "window",
+                            };
+                            serde_json::json!({
+                                "id":device.id, "label":device.label, "kind":kind,
+                                "default":device.is_default
+                            })
+                        }).collect::<Vec<_>>();
+                        emit_json(&serde_json::json!({
+                            "event":"media_capabilities", "devices":devices,
+                            "encoders":capabilities.encoders,
+                            "decoders":capabilities.decoders,
+                            "zero_copy":capabilities.zero_copy_backends
+                        }))?;
+                    }
+                    DaemonCommand::TestMicrophone => {
+                        if active_call.is_some() {
+                            emit_json(&serde_json::json!({
+                                "event":"error",
+                                "message":"the microphone test is unavailable during a call"
+                            }))?;
+                            continue;
+                        }
+                        let profile = default_media_profile(MediaKind::Voice);
+                        match media.publish(MediaKind::Voice, profile).await {
+                            Ok(()) => {
+                                let detected = tokio::time::timeout(
+                                    std::time::Duration::from_secs(3),
+                                    async {
+                                        loop {
+                                            if media
+                                                .next_rtp_packet(MediaKind::Voice)
+                                                .await?
+                                                .is_some()
+                                            {
+                                                return Ok::<_, anyhow::Error>(true);
+                                            }
+                                        }
+                                    },
+                                )
+                                .await
+                                .ok()
+                                .and_then(Result::ok)
+                                .unwrap_or(false);
+                                media.unpublish(MediaKind::Voice).await.ok();
+                                emit_json(&serde_json::json!({
+                                    "event":"microphone_test", "detected":detected
+                                }))?;
+                            }
+                            Err(error) => emit_json(&serde_json::json!({
+                                "event":"error", "message":error.to_string()
+                            }))?,
+                        }
+                    }
+                    DaemonCommand::SelectMediaDevice { kind, device_id } => {
+                        let kind = match kind.as_str() {
+                            "audio_input" => MediaDeviceKind::AudioInput,
+                            "audio_output" => MediaDeviceKind::AudioOutput,
+                            "camera" => MediaDeviceKind::Camera,
+                            _ => {
+                                emit_json(&serde_json::json!({
+                                    "event":"error",
+                                    "message":"unsupported media device kind"
+                                }))?;
+                                continue;
+                            }
+                        };
+                        match media.select_device(kind, device_id.clone()).await {
+                            Ok(()) => emit_json(&serde_json::json!({
+                                "event":"media_device_selected", "kind":kind_name(kind),
+                                "device_id":device_id
+                            }))?,
+                            Err(error) => emit_json(&serde_json::json!({
+                                "event":"error", "message":error.to_string()
+                            }))?,
+                        }
+                    }
+                    DaemonCommand::ExportBackup { path: output, passphrase } => {
+                        match export_identity_backup(path, &output, &passphrase) {
+                            Ok(()) => emit_json(&serde_json::json!({
+                                "event":"backup_exported", "path":output
+                            }))?,
+                            Err(error) => emit_json(&serde_json::json!({
+                                "event":"error", "message":error.to_string()
+                            }))?,
+                        }
+                    }
+                    DaemonCommand::ProtectLocalSecrets => {
+                        match protect_database_key(path, &mut profile) {
+                            Ok(()) => emit_json(&serde_json::json!({
+                                "event":"secure_storage", "enabled":true
+                            }))?,
+                            Err(error) => emit_json(&serde_json::json!({
+                                "event":"error", "message":error.to_string()
+                            }))?,
+                        }
+                    }
                     DaemonCommand::SetMailbox { url } => {
                         if let Some(candidate) = &url {
                             daemon_or_continue!(mailbox_endpoint(candidate, &[0; 32]));
@@ -1152,7 +1432,11 @@ async fn daemon(path: &Path) -> Result<()> {
                         })?;
                         profile.pending_invites.push(PendingInvite { shared_secret, expires_unix: expires });
                         save_profile(path, &profile)?;
-                        emit_json(&serde_json::json!({"event":"invite", "url":invite.to_url()?, "expires_unix":expires}))?;
+                        let invite_url = invite.to_url()?;
+                        emit_json(&serde_json::json!({
+                            "event":"invite", "url":invite_url, "expires_unix":expires,
+                            "qr_svg":qr_svg(invite_url.as_str())?
+                        }))?;
                     }
                     DaemonCommand::PreviewInvite { url } => {
                         let invite = daemon_or_continue!(ContactInvite::from_url(
@@ -1175,6 +1459,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             direct_addresses: invite.reachability.direct_candidates.iter().filter_map(|value| value.parse().ok()).collect(),
                             relay_urls: invite.reachability.relay_candidates.iter().map(ToString::to_string).collect(),
                         };
+                        let accepted_identity = invite.inviter_identity;
                         upsert_contact(&mut profile, Contact {
                             name: invite.display_name,
                             avatar: None,
@@ -1185,6 +1470,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             mailbox_urls: invite.reachability.mailbox_candidates,
                             shared_secret: invite.one_time_secret,
                             verified: true,
+                            manually_verified: false,
                             mls_key_package: vec![],
                             identity_events: vec![],
                             blocked: false,
@@ -1193,6 +1479,18 @@ async fn daemon(path: &Path) -> Result<()> {
                         });
                         save_profile(path, &profile)?;
                         emit_contacts(&profile)?;
+                        if let Some(accepted) = profile.contacts.iter()
+                            .find(|contact| contact.identity_id == accepted_identity)
+                            .cloned()
+                        {
+                            let conversation_id = direct_conversation_id(
+                                profile.identity_id, accepted.identity_id
+                            );
+                            deliver_payload_durable(
+                                &network, &key, &profile, &store, conversation_id,
+                                &accepted, DirectPayload::DeviceHello
+                            ).await?;
+                        }
                     }
                     DaemonCommand::Send { contact, message, reply_to } => {
                         let recipients = match contact_devices(&profile, &contact) {
@@ -1341,41 +1639,162 @@ async fn daemon(path: &Path) -> Result<()> {
                                 continue;
                             }
                         };
-                        let result = async {
-                            let mut first = None;
-                            let mut route = "direct";
-                            for recipient in &recipients {
-                                let (transfer_id, file_name, byte_len, delivery) =
-                                    send_file_packets(&network, &key, &profile, &store, recipient, &file_path).await?;
-                                match delivery {
-                                    "queued" => route = "queued",
-                                    "mailbox" if route == "direct" => route = "mailbox",
-                                    _ => {}
-                                }
-                                first.get_or_insert((transfer_id, file_name, byte_len));
+                        let metadata = match std::fs::metadata(&file_path)
+                            .with_context(|| format!("read {}", file_path.display()))
+                        {
+                            Ok(metadata) if metadata.is_file() => metadata,
+                            Ok(_) => {
+                                emit_json(&serde_json::json!({
+                                    "event":"error",
+                                    "message":"attachment must be a regular file"
+                                }))?;
+                                continue;
                             }
-                            let (transfer_id, file_name, byte_len) = first.context("contact has no active devices")?;
-                            Ok::<_, anyhow::Error>((transfer_id, file_name, byte_len, route))
-                        }.await;
-                        match result {
-                            Ok((transfer_id, file_name, byte_len, delivery)) => {
+                            Err(error) => {
+                                emit_json(&serde_json::json!({
+                                    "event":"error", "message":error.to_string()
+                                }))?;
+                                continue;
+                            }
+                        };
+                        if metadata.len() > MAX_ATTACHMENT_BYTES {
+                            emit_json(&serde_json::json!({
+                                "event":"error",
+                                "message":"attachment exceeds the 512 MiB client limit"
+                            }))?;
+                            continue;
+                        }
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        let control = Arc::new(TransferControl::new());
+                        let task_control = Arc::clone(&control);
+                        let task_network = network.clone();
+                        let task_key = key.clone();
+                        let task_profile = profile.clone();
+                        let task_profile_path = path.to_owned();
+                        let task_request_id = request_id.clone();
+                        let task_done_sender = transfer_done_sender.clone();
+                        let task = tokio::spawn(async move {
+                            let result = async {
+                                let device_count = recipients.len();
+                                let peer_identity = recipients
+                                    .first()
+                                    .context("contact has no active devices")?
+                                    .identity_id;
+                                let peer_name = recipients
+                                    .first()
+                                    .context("contact has no active devices")?
+                                    .name
+                                    .clone();
+                                let mut first = None;
+                                let mut route = "direct";
+                                let mut queued = Vec::new();
+                                for (device_index, recipient) in recipients.iter().enumerate() {
+                                    let (transfer_id, file_name, byte_len, delivery) =
+                                        send_file_packets(
+                                            &task_network,
+                                            &task_key,
+                                            &task_profile,
+                                            recipient,
+                                            &file_path,
+                                            &mut queued,
+                                            DirectTransferProgress {
+                                                id: &task_request_id,
+                                                control: &task_control,
+                                                device_index,
+                                                device_count,
+                                            },
+                                        )
+                                        .await?;
+                                    match delivery {
+                                        "queued" => route = "queued",
+                                        "mailbox" if route == "direct" => route = "mailbox",
+                                        _ => {}
+                                    }
+                                    first.get_or_insert((transfer_id, file_name, byte_len));
+                                }
+                                let (transfer_id, file_name, byte_len) =
+                                    first.context("contact has no active devices")?;
+                                if task_control.is_cancelled() {
+                                    bail!("transfer cancelled");
+                                }
+                                let task_store = Store::open(
+                                    task_profile_path.with_extension("history.sqlite3"),
+                                    &DatabaseKey::from_bytes(task_profile.database_key),
+                                )?;
+                                for packet in queued {
+                                    task_store.enqueue(
+                                        packet.conversation_id,
+                                        packet.event_id,
+                                        packet.recipient,
+                                        &packet.envelope,
+                                        next_outbox_time(),
+                                    )?;
+                                }
                                 let sent_at = OffsetDateTime::now_utc().unix_timestamp();
-                                store.save_direct_message(&DirectMessageRecord {
+                                task_store.save_direct_message(&DirectMessageRecord {
                                     message_id: transfer_id,
-                                    peer_identity: recipients[0].identity_id,
-                                    sender_name: profile.name.clone(),
+                                    peer_identity,
+                                    sender_name: task_profile.name.clone(),
                                     body: format!("📎 {file_name}"),
                                     sent_at_unix: sent_at,
                                     outgoing: true,
                                     reply_to: None,
                                     edited: false,
                                     deleted: false,
-                                    delivery: delivery.to_owned(),
+                                    delivery: route.to_owned(),
                                     file_path: Some(file_path.to_string_lossy().into_owned()),
                                 })?;
-                                emit_json(&serde_json::json!({"event":"file_sent", "to":recipients[0].name, "devices":recipients.len(), "file_name":file_name, "byte_len":byte_len, "sent_at":sent_at, "delivery":delivery}))?;
+                                Ok::<_, anyhow::Error>((
+                                    peer_name,
+                                    device_count,
+                                    file_name,
+                                    byte_len,
+                                    sent_at,
+                                    route,
+                                ))
                             }
-                            Err(error) => emit_json(&serde_json::json!({"event":"error", "message":error.to_string()}))?,
+                            .await;
+                            if task_control.is_cancelled() {
+                                let _ = emit_json(&serde_json::json!({
+                                    "event":"transfer_cancelled",
+                                    "transfer_id":task_request_id
+                                }));
+                            } else {
+                                match result {
+                                    Ok((
+                                        peer_name,
+                                        device_count,
+                                        file_name,
+                                        byte_len,
+                                        sent_at,
+                                        delivery,
+                                    )) => {
+                                        let _ = emit_json(&serde_json::json!({
+                                            "event":"file_sent", "to":peer_name,
+                                            "devices":device_count, "file_name":file_name,
+                                            "byte_len":byte_len, "sent_at":sent_at,
+                                            "delivery":delivery,
+                                            "transfer_id":task_request_id
+                                        }));
+                                    }
+                                    Err(error) => {
+                                        let _ = emit_json(&serde_json::json!({
+                                            "event":"error", "message":error.to_string()
+                                        }));
+                                    }
+                                }
+                            }
+                            let _ = task_done_sender.send(task_request_id);
+                        });
+                        transfer_tasks.insert(request_id, (control, task));
+                    }
+                    DaemonCommand::CancelTransfer { transfer_id } => {
+                        if let Some((control, _)) = transfer_tasks.get(&transfer_id) {
+                            control.cancel();
+                            emit_json(&serde_json::json!({
+                                "event":"transfer_cancelling",
+                                "transfer_id":transfer_id
+                            }))?;
                         }
                     }
                     DaemonCommand::CreateGroup { name, members } => {
@@ -1676,6 +2095,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             selected,
                             ring,
                         };
+                        let participants = call_participants_json(&recipients);
                         for recipient in &recipients {
                             daemon_or_continue!(network.send_call_signal(&recipient.address, &signal).await);
                         }
@@ -1688,11 +2108,12 @@ async fn daemon(path: &Path) -> Result<()> {
                             id: call_id, label: contact.clone(), recipients, started_at_unix,
                             connected_at: (!ring).then(std::time::Instant::now),
                         });
-                        emit_json(&serde_json::json!({"event":"call_started", "call_id":call_id.to_string(), "contact":contact, "ring":ring}))?;
+                        emit_json(&serde_json::json!({"event":"call_started", "call_id":call_id.to_string(), "contact":contact, "ring":ring, "participants":participants}))?;
                     }
                     DaemonCommand::JoinCall { contact, call_id } => {
                         let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
                         let recipients = daemon_or_continue!(resolve_call_recipients(&profile, &contact));
+                        let participants = call_participants_json(&recipients);
                         if active_call.as_ref().is_some_and(|call| call.id != call_id) {
                             if held_call.is_some() {
                                 emit_json(&serde_json::json!({"event":"error", "message":"only one held call is supported"}))?;
@@ -1723,7 +2144,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             id: call_id, label: contact.clone(), recipients, started_at_unix,
                             connected_at: Some(std::time::Instant::now()),
                         });
-                        emit_json(&serde_json::json!({"event":"call_joined", "call_id":call_id.to_string(), "contact":contact}))?;
+                        emit_json(&serde_json::json!({"event":"call_joined", "call_id":call_id.to_string(), "contact":contact, "participants":participants}))?;
                     }
                     DaemonCommand::RejectCall { contact, call_id, missed } => {
                         let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
@@ -1870,7 +2291,41 @@ async fn daemon(path: &Path) -> Result<()> {
                             emit_json(&serde_json::json!({"event":"media_changed", "kind":kind, "enabled":false}))?;
                         }
                     }
+                    DaemonCommand::SetParticipantVolume { call_id, device_id, volume } => {
+                        let call_id = daemon_or_continue!(
+                            call_id.parse::<CallId>().context("invalid call id")
+                        );
+                        let device = daemon_or_continue!(
+                            device_id.parse::<DeviceId>().context("invalid device id")
+                        );
+                        if active_call.as_ref().is_none_or(|call| {
+                            call.id != call_id ||
+                                !call.recipients.iter().any(|recipient| recipient.device_id == device)
+                        }) {
+                            emit_json(&serde_json::json!({
+                                "event":"error", "message":"call participant not found"
+                            }))?;
+                            continue;
+                        }
+                        match media.set_receive_volume(device, volume).await {
+                            Ok(()) => emit_json(&serde_json::json!({
+                                "event":"participant_volume", "device_id":device,
+                                "volume":volume
+                            }))?,
+                            Err(error) => emit_json(&serde_json::json!({
+                                "event":"error", "message":error.to_string()
+                            }))?,
+                        }
+                    }
                     DaemonCommand::Shutdown => break,
+                }
+            }
+            completed = transfer_done_receiver.recv(), if !transfer_tasks.is_empty() => {
+                if let Some(completed) = completed
+                    && let Some((_, task)) = transfer_tasks.remove(&completed)
+                    && let Err(error) = task.await
+                {
+                    tracing::warn!(%error, transfer_id = %completed, "file transfer task failed");
                 }
             }
             incoming = network.receive() => {
@@ -1883,7 +2338,7 @@ async fn daemon(path: &Path) -> Result<()> {
                                 avatar: None,
                                 device_id: packet.sender_device, public_key: packet.sender_public_key,
                                 address: packet.return_address.clone(), mailbox_urls: packet.mailbox_urls.clone(),
-                                shared_secret, verified: true,
+                                shared_secret, verified: true, manually_verified: false,
                                 mls_key_package: packet.mls_key_package.clone(),
                                 identity_events: packet.identity_events.clone(),
                                 blocked: false, removed: false, hide_presence: false,
@@ -1945,7 +2400,7 @@ async fn daemon(path: &Path) -> Result<()> {
                                         avatar: None,
                                         device_id: packet.sender_device, public_key: packet.sender_public_key,
                                         address: packet.return_address.clone(), mailbox_urls: packet.mailbox_urls.clone(),
-                                        shared_secret, verified: true,
+                                        shared_secret, verified: true, manually_verified: false,
                                         mls_key_package: packet.mls_key_package.clone(),
                                         identity_events: packet.identity_events.clone(),
                                         blocked: false, removed: false, hide_presence: false,
@@ -2037,7 +2492,12 @@ async fn daemon(path: &Path) -> Result<()> {
                                 started_at_unix: call.started_at_unix, duration_ms: 0,
                             })?;
                         }
-                        emit_json(&serde_json::json!({"event":"call_connected", "call_id":call_id.to_string(), "remote_endpoint":remote_endpoint}))?;
+                        emit_json(&serde_json::json!({
+                            "event":"call_connected", "call_id":call_id.to_string(),
+                            "remote_endpoint":remote_endpoint,
+                            "contact":remote_contact.map(|contact| contact.name.clone()),
+                            "device_id":remote_contact.map(|contact| contact.device_id)
+                        }))?;
                     }
                     CallSignal::Reject { call_id, missed } => {
                         if active_call.as_ref().is_some_and(|call| call.id == call_id) {
@@ -2071,7 +2531,11 @@ async fn daemon(path: &Path) -> Result<()> {
                             active_call = None;
                             emit_json(&serde_json::json!({"event":"call_leave", "call_id":call_id.to_string(), "remote_endpoint":remote_endpoint}))?;
                         } else {
-                            emit_json(&serde_json::json!({"event":"call_participant_leave", "call_id":call_id.to_string(), "remote_endpoint":remote_endpoint}))?;
+                            emit_json(&serde_json::json!({
+                                "event":"call_participant_leave", "call_id":call_id.to_string(),
+                                "remote_endpoint":remote_endpoint,
+                                "device_id":remote_contact.map(|contact| contact.device_id)
+                            }))?;
                         }
                     }
                     CallSignal::Media { call_id, signal } => {
@@ -2099,7 +2563,10 @@ async fn daemon(path: &Path) -> Result<()> {
                 if active_call.as_ref().is_none_or(|call| call.id != packet.call_id) {
                     continue;
                 }
-                if let Err(error) = media.receive_rtp_packet(packet.kind, packet.payload).await {
+                if let Err(error) = media
+                    .receive_rtp_packet(packet.sender, packet.kind, packet.payload)
+                    .await
+                {
                     emit_json(&serde_json::json!({"event":"error", "message":error.to_string()}))?;
                 }
             }
@@ -2107,6 +2574,14 @@ async fn daemon(path: &Path) -> Result<()> {
                 signal?;
                 break;
             }
+        }
+    }
+    for (control, _) in transfer_tasks.values() {
+        control.cancel();
+    }
+    for (transfer_id, (_, task)) in transfer_tasks {
+        if let Err(error) = task.await {
+            tracing::warn!(%error, %transfer_id, "file transfer shutdown failed");
         }
     }
     network.shutdown().await?;
@@ -2933,13 +3408,20 @@ async fn send_file_packets(
     network: &PeerNetwork,
     key: &DeviceKeyPair,
     profile: &Profile,
-    store: &Store,
     recipient: &Contact,
     path: &Path,
+    queued: &mut Vec<QueuedFilePacket>,
+    progress: DirectTransferProgress<'_>,
 ) -> Result<([u8; 32], String, u64, &'static str)> {
+    if progress.control.is_cancelled() {
+        bail!("transfer cancelled");
+    }
     let metadata = std::fs::metadata(path).with_context(|| format!("read {}", path.display()))?;
     if !metadata.is_file() {
         bail!("attachment must be a regular file");
+    }
+    if metadata.len() > MAX_ATTACHMENT_BYTES {
+        bail!("attachment exceeds the 512 MiB client limit");
     }
     let file_name = path
         .file_name()
@@ -2955,6 +3437,17 @@ async fn send_file_packets(
         256 * 1024,
     )?;
     let transfer_id = blob.manifest.ciphertext_hash;
+    let total_chunks = blob.chunks.len();
+    let overall_total = total_chunks.saturating_mul(progress.device_count);
+    emit_json(&serde_json::json!({
+        "event":"transfer_progress", "transfer_id":progress.id,
+        "file_name":file_name,
+        "sent_chunks":progress.device_index.saturating_mul(total_chunks),
+        "total_chunks":overall_total, "cancelable":true
+    }))?;
+    if progress.control.is_cancelled() {
+        bail!("transfer cancelled");
+    }
     let offer = signed_direct_packet(
         network,
         key,
@@ -2965,9 +3458,17 @@ async fn send_file_packets(
         },
     )?;
     let conversation_id = direct_conversation_id(profile.identity_id, recipient.identity_id);
-    let mut delivery =
-        deliver_signed_packet_durable(network, store, conversation_id, recipient, &offer).await?;
+    let mut delivery = tokio::select! {
+        biased;
+        () = progress.control.cancelled() => bail!("transfer cancelled"),
+        delivery = deliver_file_packet(
+            network, conversation_id, recipient, &offer, queued
+        ) => delivery?,
+    };
     for (index, ciphertext) in blob.chunks.into_iter().enumerate() {
+        if progress.control.is_cancelled() {
+            bail!("transfer cancelled");
+        }
         let packet = signed_direct_packet(
             network,
             key,
@@ -2978,14 +3479,51 @@ async fn send_file_packets(
                 ciphertext,
             },
         )?;
-        let chunk_delivery =
-            deliver_signed_packet_durable(network, store, conversation_id, recipient, &packet)
-                .await?;
+        let chunk_delivery = tokio::select! {
+            biased;
+            () = progress.control.cancelled() => bail!("transfer cancelled"),
+            delivery = deliver_file_packet(
+                network, conversation_id, recipient, &packet, queued
+            ) => delivery?,
+        };
         if chunk_delivery == "queued" || (chunk_delivery == "mailbox" && delivery == "direct") {
             delivery = chunk_delivery;
         }
+        emit_json(&serde_json::json!({
+            "event":"transfer_progress", "transfer_id":progress.id,
+            "file_name":file_name,
+            "sent_chunks":progress.device_index.saturating_mul(total_chunks) + index + 1,
+            "total_chunks":overall_total, "cancelable":true
+        }))?;
     }
     Ok((transfer_id, file_name, metadata.len(), delivery))
+}
+
+async fn deliver_file_packet(
+    network: &PeerNetwork,
+    conversation_id: ConversationId,
+    recipient: &Contact,
+    packet: &ChatPacket,
+    queued: &mut Vec<QueuedFilePacket>,
+) -> Result<&'static str> {
+    let (route, envelope) =
+        encrypt_direct_packet(packet, &recipient.shared_secret, recipient.device_id)?;
+    if network.send(&recipient.address, &envelope).await.is_ok() {
+        return Ok("direct");
+    }
+    if deposit_to_any_mailbox(&recipient.mailbox_urls, &route, &envelope)
+        .await
+        .is_ok()
+    {
+        return Ok("mailbox");
+    }
+    queued.push(QueuedFilePacket {
+        conversation_id,
+        event_id: EventId::from_bytes(*blake3::hash(&envelope).as_bytes()),
+        recipient: recipient.device_id,
+        envelope,
+    });
+    Ok("queued")
 }
 
 async fn send_group_file_packets(
@@ -2997,7 +3535,6 @@ async fn send_group_file_packets(
     group_id: ConversationId,
     path: &Path,
 ) -> Result<([u8; 32], String, u64, &'static str)> {
-    const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
     let metadata = std::fs::metadata(path).with_context(|| format!("read {}", path.display()))?;
     if !metadata.is_file() {
         bail!("attachment must be a regular file");
@@ -3032,6 +3569,13 @@ async fn send_group_file_packets(
         256 * 1024,
     )?;
     let transfer_id = blob.manifest.ciphertext_hash;
+    let total_chunks = blob.chunks.len().saturating_mul(recipients.len());
+    let mut sent_chunks = 0_usize;
+    emit_json(&serde_json::json!({
+        "event":"transfer_progress", "transfer_id":hex::encode(transfer_id),
+        "file_name":file_name, "sent_chunks":sent_chunks, "total_chunks":total_chunks,
+        "cancelable":false
+    }))?;
     let events = store.load_events(group_id)?;
     let frontier = events
         .iter()
@@ -3102,6 +3646,12 @@ async fn send_group_file_packets(
                 "mailbox" if route == "direct" => route = "mailbox",
                 _ => {}
             }
+            sent_chunks = sent_chunks.saturating_add(1);
+            emit_json(&serde_json::json!({
+                "event":"transfer_progress", "transfer_id":hex::encode(transfer_id),
+                "file_name":file_name, "sent_chunks":sent_chunks,
+                "total_chunks":total_chunks, "cancelable":false
+            }))?;
         }
     }
     Ok((transfer_id, file_name, metadata.len(), route))
@@ -3397,6 +3947,8 @@ fn emit_contacts(profile: &Profile) -> Result<()> {
                 "device_id":contact.device_id,
                 "device_count":device_count,
                 "verified":contact.verified,
+                "manually_verified":contact.manually_verified,
+                "fingerprint":identity_fingerprint(contact.identity_id),
                 "blocked":contact.blocked,
                 "hide_presence":contact.hide_presence,
                 "endpoint_id":contact.address.endpoint_id,
@@ -3404,6 +3956,35 @@ fn emit_contacts(profile: &Profile) -> Result<()> {
         })
         .collect::<Vec<_>>();
     emit_json(&serde_json::json!({"event":"contacts", "contacts":contacts}))
+}
+
+fn identity_fingerprint(identity: IdentityId) -> String {
+    let compact = identity.to_string().replace('-', "").to_uppercase();
+    compact
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn qr_svg(value: &str) -> Result<String> {
+    let code = QrCode::new(value.as_bytes()).context("create invitation QR")?;
+    let width = code.width();
+    let quiet = 4;
+    let size = width + quiet * 2;
+    let mut path = String::new();
+    for y in 0..width {
+        for x in 0..width {
+            if code[(x, y)] == Color::Dark {
+                write!(&mut path, "M{} {}h1v1h-1z", x + quiet, y + quiet)
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" shape-rendering=\"crispEdges\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><path d=\"{path}\" fill=\"#111016\"/></svg>"
+    ))
 }
 
 fn emit_groups(profile: &Profile) -> Result<()> {
@@ -3432,6 +4013,10 @@ fn emit_conversation_settings(store: &Store) -> Result<()> {
             "pinned": item.pinned,
             "archived": item.archived,
             "muted": item.muted_until_unix.is_some_and(|until| until > OffsetDateTime::now_utc().unix_timestamp()),
+            "unread":item.unread_count,
+            "last_summary":item.last_summary,
+            "last_activity":item.last_activity_unix,
+            "notification_preview":item.notification_preview,
         }))
         .collect::<Vec<_>>();
     emit_json(&serde_json::json!({"event":"conversation_settings", "settings":settings}))
@@ -3727,6 +4312,29 @@ fn resolve_call_recipients(profile: &Profile, target: &str) -> Result<Vec<Contac
     Ok(recipients)
 }
 
+fn call_participants_json(recipients: &[Contact]) -> Vec<serde_json::Value> {
+    recipients
+        .iter()
+        .map(|recipient| {
+            serde_json::json!({
+                "name":recipient.name,
+                "device_id":recipient.device_id,
+                "volume":1.0
+            })
+        })
+        .collect()
+}
+
+const fn kind_name(kind: MediaDeviceKind) -> &'static str {
+    match kind {
+        MediaDeviceKind::AudioInput => "audio_input",
+        MediaDeviceKind::AudioOutput => "audio_output",
+        MediaDeviceKind::Camera => "camera",
+        MediaDeviceKind::Screen => "screen",
+        MediaDeviceKind::Window => "window",
+    }
+}
+
 async fn link_device(path: &Path, label: &str) -> Result<()> {
     let mut profile = load_profile(path)?;
     let network = PeerNetwork::start_with_secret(profile.network_secret).await?;
@@ -3782,6 +4390,7 @@ fn make_device_link(
         mailbox_urls: profile.mailbox_url.clone().into_iter().collect(),
         shared_secret: self_shared_secret,
         verified: true,
+        manually_verified: true,
         mls_key_package: profile.mls_key_package.clone(),
         identity_events: profile.identity_events.clone(),
         blocked: false,
@@ -3828,6 +4437,7 @@ fn make_device_link(
             mailbox_urls: profile.mailbox_url.clone().into_iter().collect(),
             shared_secret: self_shared_secret,
             verified: true,
+            manually_verified: true,
             mls_key_package: vec![],
             identity_events: profile.identity_events.clone(),
             blocked: false,
@@ -3883,6 +4493,7 @@ fn import_device(path: &Path, link: &Url) -> Result<()> {
         device_secret: bundle.device_secret,
         network_secret: bundle.network_secret,
         database_key: bundle.database_key,
+        database_key_in_keyring: false,
         mls_key_package: vec![],
         mailbox_url: bundle.mailbox_url,
         contacts: bundle.contacts,
@@ -4268,6 +4879,7 @@ fn refresh_contact_device(
             mailbox_urls: packet.mailbox_urls.clone(),
             shared_secret,
             verified: template.verified,
+            manually_verified: template.manually_verified,
             mls_key_package: packet.mls_key_package.clone(),
             identity_events: packet.identity_events.clone(),
             blocked: template.blocked,
@@ -4285,18 +4897,106 @@ fn refresh_contact_device(
 
 fn load_profile(path: &Path) -> Result<Profile> {
     let bytes = std::fs::read(path).with_context(|| format!("read profile {}", path.display()))?;
-    let profile: Profile = serde_json::from_slice(&bytes).context("decode profile")?;
+    let mut profile: Profile = serde_json::from_slice(&bytes).context("decode profile")?;
     if profile.version != PROTOCOL_VERSION {
         bail!("unsupported profile version {}", profile.version);
     }
+    if profile.database_key_in_keyring {
+        profile.database_key = read_database_key(&profile)?;
+    }
     Ok(profile)
+}
+
+const BACKUP_MAGIC: &[u8] = b"PPTALK-BACKUP-1\0";
+
+fn backup_key(passphrase: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
+    if passphrase.chars().count() < 10 {
+        bail!("backup passphrase must contain at least 10 characters");
+    }
+    let mut key = [0_u8; 32];
+    Argon2::default()
+        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .map_err(|error| anyhow::anyhow!("derive backup encryption key: {error}"))?;
+    Ok(key)
+}
+
+fn export_identity_backup(profile_path: &Path, output: &Path, passphrase: &str) -> Result<()> {
+    let mut profile = load_profile(profile_path)?;
+    profile.database_key_in_keyring = false;
+    let plaintext = serde_json::to_vec(&profile)?;
+    let mut salt = [0_u8; 16];
+    let mut nonce = [0_u8; 24];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let mut key = backup_key(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce), plaintext.as_slice())
+        .map_err(|_| anyhow::anyhow!("encrypt identity backup"))?;
+    key.fill(0);
+
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = output.with_extension("tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(BACKUP_MAGIC)?;
+    file.write_all(&salt)?;
+    file.write_all(&nonce)?;
+    file.write_all(&ciphertext)?;
+    file.sync_all()?;
+    std::fs::rename(temporary, output)?;
+    Ok(())
+}
+
+fn import_identity_backup(profile_path: &Path, input: &Path, passphrase: &str) -> Result<()> {
+    if profile_path.exists() {
+        bail!("profile already exists: {}", profile_path.display());
+    }
+    let bytes = std::fs::read(input)
+        .with_context(|| format!("read identity backup {}", input.display()))?;
+    let header_len = BACKUP_MAGIC.len() + 16 + 24;
+    if bytes.len() <= header_len || !bytes.starts_with(BACKUP_MAGIC) {
+        bail!("invalid or unsupported pptalk backup");
+    }
+    let salt: [u8; 16] = bytes[BACKUP_MAGIC.len()..BACKUP_MAGIC.len() + 16]
+        .try_into()
+        .expect("checked backup salt length");
+    let nonce_start = BACKUP_MAGIC.len() + 16;
+    let nonce: [u8; 24] = bytes[nonce_start..nonce_start + 24]
+        .try_into()
+        .expect("checked backup nonce length");
+    let mut key = backup_key(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let plaintext = cipher
+        .decrypt(XNonce::from_slice(&nonce), &bytes[header_len..])
+        .map_err(|_| anyhow::anyhow!("backup passphrase is incorrect or the file is damaged"))?;
+    key.fill(0);
+    let mut profile: Profile =
+        serde_json::from_slice(&plaintext).context("decode identity backup")?;
+    if profile.version != PROTOCOL_VERSION {
+        bail!("unsupported profile version {}", profile.version);
+    }
+    profile.database_key_in_keyring = false;
+    save_profile(profile_path, &profile)
 }
 
 fn save_profile(path: &Path, profile: &Profile) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(profile)?;
+    let mut persisted = profile.clone();
+    if persisted.database_key_in_keyring {
+        persisted.database_key.fill(0);
+    }
+    let bytes = serde_json::to_vec_pretty(&persisted)?;
     let temporary = path.with_extension("tmp");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -4310,6 +5010,54 @@ fn save_profile(path: &Path, profile: &Profile) -> Result<()> {
     file.sync_all()?;
     std::fs::rename(temporary, path)?;
     Ok(())
+}
+
+fn database_key_account(profile: &Profile) -> String {
+    let device = DeviceKeyPair::from_secret_bytes(&profile.device_secret).device_id();
+    format!("{}:{device}:database", profile.identity_id)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn read_database_key(profile: &Profile) -> Result<[u8; 32]> {
+    let entry = keyring::Entry::new("pptalk", &database_key_account(profile))
+        .context("open the system secure store")?;
+    let secret = entry
+        .get_secret()
+        .context("read the database key from the system secure store")?;
+    secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("the database key in the system secure store is invalid"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn read_database_key(_profile: &Profile) -> Result<[u8; 32]> {
+    bail!("the system secure store is not supported on this platform")
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn protect_database_key(path: &Path, profile: &mut Profile) -> Result<()> {
+    if profile.database_key_in_keyring {
+        return Ok(());
+    }
+    let entry = keyring::Entry::new("pptalk", &database_key_account(profile))
+        .context("open the system secure store")?;
+    entry
+        .set_secret(&profile.database_key)
+        .context("save the database key in the system secure store")?;
+    let restored = entry
+        .get_secret()
+        .context("verify the database key in the system secure store")?;
+    if restored.as_slice() != profile.database_key {
+        bail!("the system secure store did not return the saved database key");
+    }
+    profile.database_key_in_keyring = true;
+    save_profile(path, profile)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn protect_database_key(_path: &Path, _profile: &mut Profile) -> Result<()> {
+    bail!("the system secure store is not supported on this platform")
 }
 
 #[cfg(test)]
@@ -4343,6 +5091,52 @@ mod tests {
             routing_capability(&[1; 32], DeviceId::from_bytes([4; 32]))
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn encrypted_identity_backup_restores_without_exposing_plaintext() {
+        let source = temporary_profile("backup-source");
+        let restored = temporary_profile("backup-restored");
+        let backup = temporary_profile("identity-backup").with_extension("pptalk-backup");
+        initialize(&source, "Alice Backup".into(), None).expect("init");
+        export_identity_backup(&source, &backup, "correct horse battery").expect("export backup");
+        let bytes = std::fs::read(&backup).expect("read backup");
+        assert!(bytes.starts_with(BACKUP_MAGIC));
+        assert!(!String::from_utf8_lossy(&bytes).contains("Alice Backup"));
+        assert!(import_identity_backup(&restored, &backup, "wrong passphrase").is_err());
+        import_identity_backup(&restored, &backup, "correct horse battery")
+            .expect("restore backup");
+        let restored_profile = load_profile(&restored).expect("load restored profile");
+        assert_eq!(restored_profile.name, "Alice Backup");
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(restored);
+        let _ = std::fs::remove_file(backup);
+    }
+
+    #[test]
+    fn secure_storage_profile_writes_only_a_redacted_database_key() {
+        let path = temporary_profile("secure-storage-redaction");
+        initialize(&path, "Alice".into(), None).expect("init");
+        let mut profile = load_profile(&path).expect("load");
+        assert_ne!(profile.database_key, [0; 32]);
+        profile.database_key_in_keyring = true;
+        save_profile(&path, &profile).expect("save redacted profile");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let key = persisted["database_key"].as_array().expect("database key");
+        assert!(key.iter().all(|value| value.as_u64() == Some(0)));
+        assert_eq!(persisted["database_key_in_keyring"], true);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fingerprints_are_stable_and_easy_to_compare_in_blocks() {
+        let identity = IdentityId::from_bytes([0xab; 32]);
+        let fingerprint = identity_fingerprint(identity);
+        assert_eq!(fingerprint.replace(' ', "").len(), 64);
+        assert!(fingerprint.split(' ').all(|block| block.len() == 4));
+        assert_eq!(fingerprint, identity_fingerprint(identity));
     }
 
     #[test]

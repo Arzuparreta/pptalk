@@ -114,8 +114,22 @@ def main() -> None:
             alice.send({"command": "devices"})
             alice.event("devices")
             alice.send({"command": "invite", "expires_seconds": 3600})
-            invite = alice.event("invite")["url"]
+            invite_event = alice.event("invite")
+            invite = invite_event["url"]
+            assert invite_event["qr_svg"].startswith("<svg")
             bob.send({"command": "accept", "url": invite})
+            bob.event(
+                "contacts",
+                lambda event: any(
+                    contact.get("name") == "Alice" for contact in event.get("contacts", [])
+                ),
+            )
+            alice.event(
+                "contacts",
+                lambda event: any(
+                    contact.get("name") == "Bob" for contact in event.get("contacts", [])
+                ),
+            )
             bob.send({"command": "send", "contact": "Alice", "message": "hello Alice"})
             bob.event("message_sent")
             alice.event("message", lambda event: event.get("body") == "hello Alice")
@@ -145,6 +159,44 @@ def main() -> None:
             )
             alice.event("message_edited")
             bob.event("message_edited", lambda event: event.get("body") == "hello Bob edited")
+
+            alice.send(
+                {
+                    "command": "send_file",
+                    "contact": "Bob",
+                    "path": str(repository / "README.md"),
+                }
+            )
+            alice.event("file_sent")
+            direct_file = bob.event("file_received")
+            if Path(direct_file["path"]).read_bytes() != (repository / "README.md").read_bytes():
+                raise RuntimeError("received direct attachment differs from source")
+
+            cancelled_path = root / "cancelled-transfer.bin"
+            with cancelled_path.open("wb") as cancelled_file:
+                cancelled_file.truncate(8 * 1024 * 1024)
+            alice.send(
+                {
+                    "command": "send_file",
+                    "contact": "Bob",
+                    "path": str(cancelled_path),
+                }
+            )
+            cancellable = alice.event(
+                "transfer_progress",
+                lambda event: event.get("cancelable") is True
+                and event.get("file_name") == cancelled_path.name,
+            )
+            alice.send(
+                {
+                    "command": "cancel_transfer",
+                    "transfer_id": cancellable["transfer_id"],
+                }
+            )
+            alice.event(
+                "transfer_cancelled",
+                lambda event: event.get("transfer_id") == cancellable["transfer_id"],
+            )
 
             alice.send({"command": "start_call", "contact": "Bob", "ring": False})
             silent_call = alice.event("call_started")
@@ -371,8 +423,8 @@ def main() -> None:
                 peer.close()
 
     print(
-        "pptalk e2e smoke: replies, edits, calls, reconnect, MLS files, "
-        "history sync, multi-device and revocation passed"
+        "pptalk e2e smoke: symmetric contacts, direct files, cancellation, replies, "
+        "edits, calls, reconnect, MLS files, history sync, multi-device and revocation passed"
     )
 
 

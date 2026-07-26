@@ -25,7 +25,8 @@ El script:
 
 1. compila el cliente y sus componentes;
 2. abre el cliente nativo Qt;
-3. crea o migra el perfil local sin borrar la identidad existente.
+3. migra un perfil existente sin borrar su identidad o muestra las opciones para
+   crear, vincular o restaurar una identidad.
 
 No usa Electron, Chromium, Node.js ni un servidor web para la interfaz.
 
@@ -81,8 +82,9 @@ En Linux, Qt guarda normalmente el perfil en:
 ```
 
 El directorio contiene la identidad del dispositivo y la base cifrada. No lo
-borres para solucionar un error y no lo compartas con nadie. Haz una copia
-segura si el perfil te importa. Los logs y PIDs de desarrollo quedan en
+borres para solucionar un error y no lo compartas con nadie. Usa **Ajustes →
+Copia cifrada de identidad** en vez de copiar archivos internos mientras la
+aplicación está abierta. Los logs y PIDs de desarrollo quedan en
 `build/dev/`; esa carpeta sí es desechable.
 
 ## Desinstalar

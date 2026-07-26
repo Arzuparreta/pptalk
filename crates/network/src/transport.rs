@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, str::FromStr};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayUrl, SecretKey, TransportAddr,
@@ -91,12 +91,12 @@ pub enum NetworkError {
 
 /// Authenticated QUIC endpoint. Iroh attempts direct UDP paths first and can
 /// fall back to an encrypted relay path without exposing message plaintext.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PeerNetwork {
     router: Router,
-    incoming: Mutex<mpsc::Receiver<IncomingEnvelope>>,
-    calls: Mutex<mpsc::Receiver<IncomingEnvelope>>,
-    media: Mutex<mpsc::Receiver<IncomingMediaDatagram>>,
+    incoming: Arc<Mutex<mpsc::Receiver<IncomingEnvelope>>>,
+    calls: Arc<Mutex<mpsc::Receiver<IncomingEnvelope>>>,
+    media: Arc<Mutex<mpsc::Receiver<IncomingMediaDatagram>>>,
 }
 
 impl PeerNetwork {
@@ -148,9 +148,9 @@ impl PeerNetwork {
             .spawn();
         Self {
             router,
-            incoming: Mutex::new(receiver),
-            calls: Mutex::new(call_receiver),
-            media: Mutex::new(media_receiver),
+            incoming: Arc::new(Mutex::new(receiver)),
+            calls: Arc::new(Mutex::new(call_receiver)),
+            media: Arc::new(Mutex::new(media_receiver)),
         }
     }
 
