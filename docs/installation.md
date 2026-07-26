@@ -24,9 +24,8 @@ cd pptalk
 El script:
 
 1. compila el cliente y sus componentes;
-2. arranca un buzón local de desarrollo en `127.0.0.1:9464`;
-3. espera a que esté sano;
-4. abre el cliente nativo Qt.
+2. abre el cliente nativo Qt;
+3. crea o migra el perfil local sin borrar la identidad existente.
 
 No usa Electron, Chromium, Node.js ni un servidor web para la interfaz.
 
@@ -45,7 +44,7 @@ Necesitas Rust, CMake, Ninja, Qt 6.8+ y GStreamer 1.24+ disponibles en `PATH`.
 Desde PowerShell:
 
 ```powershell
-cargo build --locked -p pptalk-cli -p pptalk-node
+cargo build --locked -p pptalk-cli
 cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/desktop
 $env:PPTALK_CLI = (Resolve-Path target/debug/pptalk-cli.exe)
@@ -53,8 +52,11 @@ $env:PPTALK_CLI = (Resolve-Path target/debug/pptalk-cli.exe)
 ```
 
 Según el generador de CMake, el ejecutable puede quedar en una subcarpeta como
-`build/desktop/Debug/`. El buzón es opcional para hablar directamente; su
-ejecutable es `target/debug/pptalk-node.exe`.
+`build/desktop/Debug/`.
+
+Las etiquetas de versión generan un instalador `.exe` para Windows y AppImage
+para Linux x86_64 y arm64. El paquete `pptalk-bin` de AUR usa la AppImage x86_64;
+hasta que exista una versión publicada, compila desde el repositorio.
 
 ## Comprobar la instalación
 
@@ -80,8 +82,8 @@ En Linux, Qt guarda normalmente el perfil en:
 
 El directorio contiene la identidad del dispositivo y la base cifrada. No lo
 borres para solucionar un error y no lo compartas con nadie. Haz una copia
-segura si el perfil te importa. El nodo local de desarrollo guarda sus datos y
-logs en `build/dev/`; esa carpeta sí es desechable.
+segura si el perfil te importa. Los logs y PIDs de desarrollo quedan en
+`build/dev/`; esa carpeta sí es desechable.
 
 ## Desinstalar
 

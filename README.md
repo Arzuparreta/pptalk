@@ -5,7 +5,7 @@ una empresa. pptalk es una aplicación nativa de escritorio para mensajes,
 archivos, grupos y llamadas cifradas entre los dispositivos de sus usuarios.
 
 > **Estado actual:** funciona como versión de desarrollo, pero todavía no es un
-> producto auditado ni tiene instaladores estables. No lo uses aún si una
+> producto auditado ni tiene una entrega estable publicada. No lo uses aún si una
 > vulnerabilidad pudiera poner a alguien en peligro.
 
 ## Empezar
@@ -36,7 +36,8 @@ Los dos debéis tener pptalk abierto durante la primera conexión.
 
 1. Pulsa **+** en la esquina superior izquierda.
 2. Pulsa **Copiar enlace** y envíaselo a tu amigo por un canal de confianza.
-3. Tu amigo abre su propio botón **+**, pega el enlace y pulsa **Aceptar**.
+3. Tu amigo abre su propio botón **+**, pega el enlace, pulsa **Revisar invitación**
+   y confirma tu nombre.
 4. La conversación aparecerá en la columna izquierda.
 
 El enlace caduca y solo se puede aceptar una vez. No lo publiques: durante su
@@ -48,7 +49,7 @@ vigencia funciona como una invitación privada.
 - Pulsa el **+** junto al cuadro de texto para enviar un archivo cifrado.
 - Pulsa el **teléfono** para llamar o abrir una sala sin hacer sonar al otro.
 - Pulsa **◫** arriba a la izquierda para crear un grupo con contactos existentes.
-- Pulsa **⚙** para configurar vídeo, un buzón opcional o un segundo dispositivo.
+- Pulsa **⚙** para cambiar tu perfil, configurar llamadas o vincular otro dispositivo.
 
 La [guía de uso](docs/user-guide.md) explica cada pantalla, los grupos, las
 llamadas, el uso sin conexión y la vinculación de dispositivos.
@@ -59,9 +60,11 @@ Cuando es posible, los dispositivos se conectan directamente. Si la red lo
 impide, pueden usar transporte intermedio cifrado. Ese transporte puede ver que
 existe tráfico, pero no el contenido.
 
-Un nodo de buzón es opcional. Sirve para guardar sobres ya cifrados mientras el
-destinatario está desconectado; no contiene cuentas, historial legible ni claves
-de descifrado. Puedes usar pptalk sin configurar uno.
+No hay que configurar un servidor ni enviar un código en cada llamada. Los
+contactos aceptados y el historial se conservan localmente. Si el destinatario
+está desconectado, el envío queda pendiente en tu dispositivo hasta que vuelve a
+existir una ruta; el almacenamiento distribuido sin conexión todavía está en
+evaluación y no se anuncia como disponible.
 
 Tus claves y tu historial viven en tus dispositivos. Esto evita una autoridad
 central, pero tiene una consecuencia importante: si pierdes todos tus
@@ -87,7 +90,6 @@ Para usar pptalk:
 - [Instalación](docs/installation.md)
 - [Guía de uso](docs/user-guide.md)
 - [Seguridad y límites](docs/threat-model.md)
-- [Montar un buzón propio](docs/self-hosting.md)
 
 Para desarrollar pptalk:
 
@@ -98,5 +100,6 @@ Para desarrollar pptalk:
 
 ## Licencia
 
-El cliente y las bibliotecas compartidas usan `GPL-3.0-or-later`. El nodo de red
-usa `AGPL-3.0-or-later`. Consulta [LICENSE](LICENSE) y [LICENSES](LICENSES/).
+El cliente y las bibliotecas compartidas usan `GPL-3.0-or-later`. El nodo de
+desarrollo legado usa `AGPL-3.0-or-later`; el spike Veilid aislado usa
+`MPL-2.0`. Consulta [LICENSE](LICENSE) y [LICENSES](LICENSES/).

@@ -15,7 +15,7 @@ En términos de producto:
 - una identidad es un registro criptográfico compartido por sus dispositivos;
 - un contacto es una identidad aceptada mediante una invitación;
 - una conversación es un registro cifrado independiente;
-- el creador de un grupo controla quién entra y sale;
+- el propietario y sus administradores controlan quién entra y sale;
 - un nodo opcional transporta datos opacos, pero no decide identidades ni
   membresías.
 
@@ -52,8 +52,10 @@ El primer dispositivo crea:
 4. una base local SQLCipher.
 
 Un segundo dispositivo genera sus propias claves y recibe una autorización
-firmada por uno ya válido. No se clona una identidad MLS. Al revocarlo, deja de
-recibir envíos y los grupos controlados avanzan a claves que ya no lo incluyen.
+firmada por uno ya válido. No se clona una identidad MLS. Los dispositivos de la
+misma identidad sincronizan el texto de chats directos, pero no adjuntos
+antiguos. Al revocarlo, deja de recibir envíos y los grupos controlados avanzan a
+claves que ya no lo incluyen.
 
 Las invitaciones de contacto contienen una capacidad de un solo uso, una prueba
 firmada de dirección y una caducidad. La interfaz actual confía en el canal por
@@ -67,8 +69,10 @@ peers comparan sus fronteras causales y transmiten únicamente los eventos que
 faltan.
 
 Si ninguna ruta está disponible, el sobre cifrado permanece en el outbox del
-emisor. Si el destinatario anunció un buzón, el emisor también puede depositarlo
-allí. El nodo nunca recibe el contenido sin cifrar.
+emisor. El cliente de escritorio no configura buzones. El prototipo Veilid está
+aislado en `crates/distributed`: publica datos reales, pero la recuperación desde
+un segundo nodo provoca un fallo de apagado reproducible en Veilid 0.5.7. Por eso
+no forma parte de la ruta del producto.
 
 Un miembro nuevo de un grupo solo puede sincronizar desde el momento en que fue
 admitido. Los mensajes anteriores no forman parte de su historial autorizado.
@@ -79,9 +83,8 @@ Los grupos usan MLS (RFC 9420). Añadir, expulsar o revocar un dispositivo crea
 una época nueva. Cada dispositivo ocupa una hoja propia; compartir una identidad
 humana no significa compartir material de clave entre equipos.
 
-En la implementación actual, el creador es el único administrador del grupo.
-Esto simplifica el consenso P2P inicial, aunque no pretende ser el modelo final
-para comunidades grandes.
+Los grupos tienen propietario y administradores. El propietario puede transferir
+su rol o disolver el grupo. El límite es de 16 miembros.
 
 ## Red y nodos opcionales
 
@@ -91,9 +94,10 @@ atravesado de NAT. pptalk separa dos canales:
 - `pptalk/sync/1`: mensajes duraderos, archivos y sincronización;
 - `pptalk/call/1`: señales efímeras de llamada.
 
-`pptalk-node` implementa actualmente un buzón HTTP de almacenamiento y reenvío.
-No es un servidor de cuentas, un historial central, un SFU ni una autoridad de
-grupos. El relay/NAT traversal en vivo lo proporciona Iroh.
+`pptalk-node` conserva el buzón HTTP legado para pruebas de compatibilidad, pero
+no se incluye en los paquetes ni arranca por defecto. No es un servidor de
+cuentas, un SFU ni una autoridad de grupos. El relay/NAT traversal en vivo lo
+proporciona Iroh.
 
 ## Llamadas y multimedia
 
@@ -101,9 +105,8 @@ GStreamer realiza captura, codificación y reproducción nativas. El audio, víd
 y pantalla viajan como RTP sobre canales de transporte separados de los
 mensajes.
 
-Las llamadas de grupo usan una malla entre participantes. El objetivo de
-optimización actual son ocho personas; no hay un límite duro de protocolo, pero
-una malla no escala como un SFU.
+Las llamadas de grupo usan una malla entre participantes y tienen un límite duro
+de ocho personas.
 
 ## Mapa del código
 
@@ -118,3 +121,4 @@ una malla no escala como un SFU.
 | `crates/storage` | SQLCipher, outbox y blobs |
 | `crates/media` | Captura y calidad GStreamer |
 | `crates/protocol` | Tipos CBOR y límites de protocolo |
+| `crates/distributed` | Spike Veilid aislado, fuera de la ruta del producto |

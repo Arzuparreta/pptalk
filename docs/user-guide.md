@@ -29,7 +29,8 @@ superior izquierda.
 1. Copia el enlace completo que te han enviado.
 2. Abre pptalk y pulsa **+**.
 3. Pega el enlace en “O pega una invitación que te hayan enviado”.
-4. Pulsa **Aceptar**.
+4. Pulsa **Revisar invitación**.
+5. Comprueba el nombre y la caducidad y confirma **Aceptar**.
 
 El contacto aparecerá en la lista. La invitación caduca y es de un solo uso. Si
 ha expirado, el remitente debe generar otra. Envíala por un canal de confianza:
@@ -48,6 +49,17 @@ Selecciona un contacto o grupo en la columna izquierda.
 Los archivos se cifran antes de salir del dispositivo. Si el receptor no está
 disponible, pptalk intenta entregarlos cuando vuelva a existir una ruta.
 
+Los contactos y los mensajes se recuerdan al cerrar la aplicación. Pulsa con el
+botón derecho sobre un mensaje para **Responder**, **Editar** o **Eliminar para
+todos**. La búsqueda de la columna izquierda busca texto en todo el historial
+local. “Entregado” confirma que el otro dispositivo guardó el mensaje; pptalk no
+envía confirmaciones de lectura.
+
+El menú **⋯** de un contacto permite fijar, archivar o silenciar la conversación,
+ocultar tu presencia para esa persona, bloquearla o eliminarla. El historial
+local no se borra al eliminar un contacto. Para recuperarlo como contacto hace
+falta aceptar una invitación nueva.
+
 La etiqueta de la parte superior indica la ruta actual. “P2P directo” significa
 que existe conexión directa; “E2EE · ruta automática” significa que el contenido
 sigue cifrado de extremo a extremo aunque la ruta pueda pasar por infraestructura
@@ -64,8 +76,10 @@ intermedia.
 MLS es el sistema que cambia las claves cifradas del grupo cuando entra o sale
 alguien; no tienes que configurarlo manualmente.
 
-El creador administra la membresía. Dentro del grupo, el botón **⋯** permite
-añadir o expulsar un contacto escribiendo su nombre exacto.
+Un grupo admite hasta 16 miembros. El propietario puede nombrar administradores,
+transferir la propiedad o disolver el grupo. Propietario y administradores pueden
+añadir o expulsar miembros normales desde **⋯**. Una llamada admite hasta ocho
+participantes.
 
 Una persona añadida más tarde no recibe el historial anterior a su entrada. Al
 expulsar a una persona o revocar uno de sus dispositivos, el grupo cambia sus
@@ -85,7 +99,11 @@ Durante la llamada puedes activar o desactivar:
 - cámara: botón **▣**;
 - compartir pantalla: botón **↗**.
 
-La cámara y la pantalla comienzan apagadas. **Salir** abandona la llamada.
+El micrófono, la cámara y la pantalla permanecen apagados mientras suena la
+llamada; el micrófono se activa al aceptar. Si nadie responde, la llamada termina
+a los 30 segundos y queda como perdida. **Ⅱ** retiene una llamada y **Salir** la
+abandona. Las llamadas contestadas, rechazadas y perdidas quedan en el historial
+local de la conversación.
 
 En **⚙ → Calidad de cámara y pantalla** puedes dejar calidad automática o fijar
 una resolución. Si eliges un modo manual que el equipo no puede cumplir, pptalk
@@ -93,20 +111,11 @@ muestra el error en vez de reducir la calidad silenciosamente.
 
 ## Mensajes cuando alguien está desconectado
 
-Sin buzón, pptalk conserva localmente los envíos pendientes y vuelve a
-intentarlos cuando los dos dispositivos pueden encontrarse.
-
-Un buzón opcional permite depositar temporalmente mensajes ya cifrados mientras
-el receptor está desconectado. Para configurarlo:
-
-1. abre **⚙**;
-2. pega la URL en **Nodo de buzón cifrado**;
-3. pulsa **Guardar**.
-
-Déjalo vacío si quieres usar solo rutas P2P. El nodo local que arranca
-`scripts/dev.sh` sirve para desarrollo en la misma máquina; para amigos en
-Internet necesitas una URL accesible por ambos. Consulta
-[montar un buzón propio](self-hosting.md).
+pptalk conserva localmente los envíos pendientes y vuelve a intentarlos cuando
+los dos dispositivos pueden encontrarse. La aplicación no pide una URL de buzón
+ni depende de un servidor del proyecto. La ruta distribuida para entregar con
+ambos clientes desconectados aún no ha superado la prueba de viabilidad, por lo
+que esta versión no promete entrega offline.
 
 ## Usar la identidad en otro dispositivo
 
@@ -131,16 +140,26 @@ revocar cualquier dispositivo salvo el que estás usando. La revocación no borr
 remotamente un ordenador perdido; impide que siga participando con una identidad
 válida y actualiza los grupos que controlas.
 
-## Qué debes guardar
+Al coincidir en línea, los dispositivos autorizados sincronizan el texto de los
+chats directos. Los archivos antiguos no se copian; solo se conserva su mensaje.
+Una identidad admite como máximo cinco dispositivos activos.
 
-No existe recuperación central. Si pierdes todos los dispositivos y todas las
-copias de sus datos, pierdes la identidad y el historial que no hayas exportado.
+## Ajustes
 
-Protege el directorio de datos con cifrado de disco y una sesión de sistema
-bloqueada. No envíes `profile.json`, bases de datos ni enlaces de dispositivo a
-personas que no deban controlar tu identidad. Para hacer una copia consistente,
-cierra primero pptalk con `./scripts/dev.sh stop` y copia entonces el directorio
-completo de datos.
+**No molestar** es manual y no caduca solo. **Micrófono al entrar** permite elegir
+**Micrófono abierto** o **Pulsar para hablar**. En Windows
+aparece **Abrir pptalk al iniciar Windows**, desactivado de forma predeterminada;
+al activarlo abre la ventana principal. Ese ajuste no existe en Linux.
+En **Pulsar para hablar**, mantén `Ctrl + Espacio` durante la llamada. Cuando hay
+una versión publicada más nueva, **Ajustes** muestra su descarga; los paquetes
+AUR se actualizan con el gestor de paquetes.
+
+## Pérdida del dispositivo
+
+No existe recuperación central ni una copia de seguridad soportada por la app.
+Si pierdes todos los dispositivos, pierdes la identidad. Protege la sesión del
+sistema y su disco; no envíes `profile.json`, bases de datos ni enlaces de
+dispositivo a nadie que no deba controlar tu identidad.
 
 ## Problemas comunes
 
@@ -165,8 +184,8 @@ Comprueba que Qt y GStreamer cumplen las versiones de la
 
 - Mira la etiqueta de conexión de la conversación.
 - Mantén ambos clientes abiertos para forzar un nuevo intento directo.
-- Si esperas entrega sin conexión, comprueba que el buzón configurado es
-  accesible desde Internet y no solo desde `127.0.0.1`.
+- Si la otra persona está desconectada, espera a que ambos clientes vuelvan a
+  estar abiertos: esta versión no promete entrega offline distribuida.
 
 ### Aparece un error de base de datos o MLS
 
@@ -174,9 +193,3 @@ No borres el perfil. Reinicia con la versión más reciente y guarda el mensaje
 completo de `./scripts/dev.sh logs desktop`. Las migraciones de formatos locales
 se aplican al abrir; conservar el perfil permite diagnosticar y recuperar el
 estado.
-
-### El script dice que un puerto ya está ocupado
-
-Ejecuta `./scripts/dev.sh status`. El script se niega a cerrar procesos que no
-pertenezcan a este repositorio. Si otro programa usa `9464`, cambia juntos la
-dirección y la URL del nodo siguiendo `./scripts/dev.sh help`.

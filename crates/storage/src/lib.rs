@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DatabaseKey([u8; 32]);
@@ -154,9 +154,67 @@ impl Store {
              CREATE INDEX IF NOT EXISTS direct_messages_timeline
                ON direct_messages(peer_identity, sent_at_unix, message_id);
 
-             UPDATE schema_meta SET version = 1 WHERE singleton = 1;
+             UPDATE schema_meta SET version = 1 WHERE singleton = 1 AND version = 0;
              COMMIT;",
         )?;
+        let version: i64 = self.connection.query_row(
+            "SELECT version FROM schema_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if version == 1 {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE direct_messages ADD COLUMN reply_to BLOB;
+                 ALTER TABLE direct_messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE direct_messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE direct_messages ADD COLUMN delivery TEXT NOT NULL DEFAULT 'delivered';
+                 ALTER TABLE direct_messages ADD COLUMN file_path TEXT;
+
+                 CREATE TABLE conversation_settings (
+                   conversation_key TEXT PRIMARY KEY,
+                   pinned INTEGER NOT NULL DEFAULT 0,
+                   archived INTEGER NOT NULL DEFAULT 0,
+                   muted_until_unix INTEGER,
+                   unread_count INTEGER NOT NULL DEFAULT 0,
+                   last_summary TEXT NOT NULL DEFAULT '',
+                   last_activity_unix INTEGER NOT NULL DEFAULT 0,
+                   notification_preview INTEGER NOT NULL DEFAULT 1
+                 ) WITHOUT ROWID;
+
+                 CREATE TABLE call_events (
+                   call_id BLOB PRIMARY KEY,
+                   conversation_key TEXT NOT NULL,
+                   direction TEXT NOT NULL,
+                   outcome TEXT NOT NULL,
+                   started_at_unix INTEGER NOT NULL,
+                   duration_ms INTEGER NOT NULL DEFAULT 0
+                 ) WITHOUT ROWID;
+                 CREATE INDEX call_events_conversation
+                   ON call_events(conversation_key, started_at_unix DESC);
+
+                 CREATE VIRTUAL TABLE direct_messages_fts USING fts5(
+                   message_id UNINDEXED, body, sender_name
+                 );
+                 INSERT INTO direct_messages_fts(message_id, body, sender_name)
+                   SELECT message_id, body, sender_name FROM direct_messages;
+                 CREATE TRIGGER direct_messages_fts_insert AFTER INSERT ON direct_messages BEGIN
+                   INSERT INTO direct_messages_fts(message_id, body, sender_name)
+                   VALUES (new.message_id, new.body, new.sender_name);
+                 END;
+                 CREATE TRIGGER direct_messages_fts_delete AFTER DELETE ON direct_messages BEGIN
+                   DELETE FROM direct_messages_fts WHERE message_id = old.message_id;
+                 END;
+                 CREATE TRIGGER direct_messages_fts_update AFTER UPDATE OF body, sender_name ON direct_messages BEGIN
+                   DELETE FROM direct_messages_fts WHERE message_id = old.message_id;
+                   INSERT INTO direct_messages_fts(message_id, body, sender_name)
+                   VALUES (new.message_id, new.body, new.sender_name);
+                 END;
+
+                 UPDATE schema_meta SET version = 2 WHERE singleton = 1;
+                 COMMIT;",
+            )?;
+        }
         let version: i64 = self.connection.query_row(
             "SELECT version FROM schema_meta WHERE singleton = 1",
             [],
@@ -377,8 +435,9 @@ impl Store {
     pub fn save_direct_message(&self, message: &DirectMessageRecord) -> Result<bool, StorageError> {
         let changed = self.connection.execute(
             "INSERT OR IGNORE INTO direct_messages(
-               message_id, peer_identity, sender_name, body, sent_at_unix, outgoing
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+               message_id, peer_identity, sender_name, body, sent_at_unix, outgoing,
+               reply_to, edited, deleted, delivery, file_path
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 message.message_id.as_slice(),
                 message.peer_identity.as_bytes().as_slice(),
@@ -386,6 +445,11 @@ impl Store {
                 message.body,
                 message.sent_at_unix,
                 message.outgoing,
+                message.reply_to.map(|value| value.to_vec()),
+                message.edited,
+                message.deleted,
+                message.delivery,
+                message.file_path,
             ],
         )?;
         Ok(changed == 1)
@@ -398,7 +462,8 @@ impl Store {
     ) -> Result<Vec<DirectMessageRecord>, StorageError> {
         let limit = i64::try_from(limit).map_err(|_| StorageError::IntegerOverflow)?;
         let mut statement = self.connection.prepare(
-            "SELECT message_id, peer_identity, sender_name, body, sent_at_unix, outgoing
+            "SELECT message_id, peer_identity, sender_name, body, sent_at_unix, outgoing,
+                    reply_to, edited, deleted, delivery, file_path
              FROM direct_messages WHERE peer_identity = ?1
              ORDER BY sent_at_unix DESC, message_id DESC LIMIT ?2",
         )?;
@@ -411,11 +476,235 @@ impl Store {
                     body: row.get(3)?,
                     sent_at_unix: row.get(4)?,
                     outgoing: row.get(5)?,
+                    reply_to: row
+                        .get::<_, Option<Vec<u8>>>(6)?
+                        .map(|value| bytes_32(&value)),
+                    edited: row.get(7)?,
+                    deleted: row.get(8)?,
+                    delivery: row.get(9)?,
+                    file_path: row.get(10)?,
                 })
             })?;
         let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
         messages.reverse();
         Ok(messages)
+    }
+
+    pub fn load_all_direct_messages(&self) -> Result<Vec<DirectMessageRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, peer_identity, sender_name, body, sent_at_unix, outgoing,
+                    reply_to, edited, deleted, delivery, file_path
+             FROM direct_messages ORDER BY sent_at_unix, message_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(DirectMessageRecord {
+                message_id: bytes_32(row.get_ref(0)?.as_blob()?),
+                peer_identity: identity_id_from_blob(row.get_ref(1)?.as_blob()?),
+                sender_name: row.get(2)?,
+                body: row.get(3)?,
+                sent_at_unix: row.get(4)?,
+                outgoing: row.get(5)?,
+                reply_to: row
+                    .get::<_, Option<Vec<u8>>>(6)?
+                    .map(|value| bytes_32(&value)),
+                edited: row.get(7)?,
+                deleted: row.get(8)?,
+                delivery: row.get(9)?,
+                file_path: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::Sqlite)
+    }
+
+    pub fn update_direct_message(
+        &self,
+        message_id: [u8; 32],
+        peer_identity: IdentityId,
+        outgoing: bool,
+        body: Option<&str>,
+        deleted: bool,
+    ) -> Result<bool, StorageError> {
+        let changed = if deleted {
+            self.connection.execute(
+                "UPDATE direct_messages SET body = '', deleted = 1, edited = 0
+                 WHERE message_id = ?1 AND peer_identity = ?2 AND outgoing = ?3",
+                params![
+                    message_id.as_slice(),
+                    peer_identity.as_bytes().as_slice(),
+                    outgoing
+                ],
+            )?
+        } else if let Some(body) = body {
+            self.connection.execute(
+                "UPDATE direct_messages SET body = ?2, edited = 1
+                 WHERE message_id = ?1 AND peer_identity = ?3 AND outgoing = ?4 AND deleted = 0",
+                params![
+                    message_id.as_slice(),
+                    body,
+                    peer_identity.as_bytes().as_slice(),
+                    outgoing
+                ],
+            )?
+        } else {
+            0
+        };
+        Ok(changed == 1)
+    }
+
+    pub fn set_direct_delivery(
+        &self,
+        message_id: [u8; 32],
+        delivery: &str,
+    ) -> Result<bool, StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE direct_messages SET delivery = ?2 WHERE message_id = ?1",
+            params![message_id.as_slice(), delivery],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn delete_direct_message_local(
+        &self,
+        message_id: [u8; 32],
+        peer_identity: IdentityId,
+    ) -> Result<bool, StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE direct_messages SET body = '', deleted = 1, edited = 0
+             WHERE message_id = ?1 AND peer_identity = ?2",
+            params![message_id.as_slice(), peer_identity.as_bytes().as_slice()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn search_direct_messages(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DirectMessageRecord>, StorageError> {
+        let limit = i64::try_from(limit).map_err(|_| StorageError::IntegerOverflow)?;
+        let mut statement = self.connection.prepare(
+            "SELECT d.message_id, d.peer_identity, d.sender_name, d.body, d.sent_at_unix,
+                    d.outgoing, d.reply_to, d.edited, d.deleted, d.delivery, d.file_path
+             FROM direct_messages_fts f
+             JOIN direct_messages d ON d.message_id = f.message_id
+             WHERE direct_messages_fts MATCH ?1 AND d.deleted = 0
+             ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![query, limit], |row| {
+            Ok(DirectMessageRecord {
+                message_id: bytes_32(row.get_ref(0)?.as_blob()?),
+                peer_identity: identity_id_from_blob(row.get_ref(1)?.as_blob()?),
+                sender_name: row.get(2)?,
+                body: row.get(3)?,
+                sent_at_unix: row.get(4)?,
+                outgoing: row.get(5)?,
+                reply_to: row
+                    .get::<_, Option<Vec<u8>>>(6)?
+                    .map(|value| bytes_32(&value)),
+                edited: row.get(7)?,
+                deleted: row.get(8)?,
+                delivery: row.get(9)?,
+                file_path: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::Sqlite)
+    }
+
+    pub fn save_conversation_settings(
+        &self,
+        settings: &ConversationSettings,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO conversation_settings(
+               conversation_key, pinned, archived, muted_until_unix, unread_count,
+               last_summary, last_activity_unix, notification_preview
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(conversation_key) DO UPDATE SET
+               pinned=excluded.pinned, archived=excluded.archived,
+               muted_until_unix=excluded.muted_until_unix, unread_count=excluded.unread_count,
+               last_summary=excluded.last_summary, last_activity_unix=excluded.last_activity_unix,
+               notification_preview=excluded.notification_preview",
+            params![
+                settings.conversation_key,
+                settings.pinned,
+                settings.archived,
+                settings.muted_until_unix,
+                settings.unread_count,
+                settings.last_summary,
+                settings.last_activity_unix,
+                settings.notification_preview,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_conversation_settings(&self) -> Result<Vec<ConversationSettings>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT conversation_key, pinned, archived, muted_until_unix, unread_count,
+                    last_summary, last_activity_unix, notification_preview
+             FROM conversation_settings ORDER BY pinned DESC, last_activity_unix DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ConversationSettings {
+                conversation_key: row.get(0)?,
+                pinned: row.get(1)?,
+                archived: row.get(2)?,
+                muted_until_unix: row.get(3)?,
+                unread_count: row.get(4)?,
+                last_summary: row.get(5)?,
+                last_activity_unix: row.get(6)?,
+                notification_preview: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::Sqlite)
+    }
+
+    pub fn save_call_event(&self, event: &CallEventRecord) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO call_events(call_id, conversation_key, direction, outcome,
+               started_at_unix, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(call_id) DO UPDATE SET outcome=excluded.outcome,
+               duration_ms=excluded.duration_ms",
+            params![
+                event.call_id.as_slice(),
+                event.conversation_key,
+                event.direction,
+                event.outcome,
+                event.started_at_unix,
+                i64::try_from(event.duration_ms).map_err(|_| StorageError::IntegerOverflow)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_call_events(
+        &self,
+        conversation_key: &str,
+        limit: usize,
+    ) -> Result<Vec<CallEventRecord>, StorageError> {
+        let limit = i64::try_from(limit).map_err(|_| StorageError::IntegerOverflow)?;
+        let mut statement = self.connection.prepare(
+            "SELECT call_id, conversation_key, direction, outcome, started_at_unix, duration_ms
+             FROM call_events WHERE conversation_key = ?1
+             ORDER BY started_at_unix DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![conversation_key, limit], |row| {
+            Ok(CallEventRecord {
+                call_id: bytes_32(row.get_ref(0)?.as_blob()?),
+                conversation_key: row.get(1)?,
+                direction: row.get(2)?,
+                outcome: row.get(3)?,
+                started_at_unix: row.get(4)?,
+                duration_ms: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
+            })
+        })?;
+        let mut events = rows.collect::<Result<Vec<_>, _>>()?;
+        events.reverse();
+        Ok(events)
     }
 }
 
@@ -427,6 +716,33 @@ pub struct DirectMessageRecord {
     pub body: String,
     pub sent_at_unix: i64,
     pub outgoing: bool,
+    pub reply_to: Option<[u8; 32]>,
+    pub edited: bool,
+    pub deleted: bool,
+    pub delivery: String,
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationSettings {
+    pub conversation_key: String,
+    pub pinned: bool,
+    pub archived: bool,
+    pub muted_until_unix: Option<i64>,
+    pub unread_count: u32,
+    pub last_summary: String,
+    pub last_activity_unix: i64,
+    pub notification_preview: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEventRecord {
+    pub call_id: [u8; 32],
+    pub conversation_key: String,
+    pub direction: String,
+    pub outcome: String,
+    pub started_at_unix: i64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,6 +879,11 @@ mod tests {
             body: "later".into(),
             sent_at_unix: 20,
             outgoing: false,
+            reply_to: None,
+            edited: false,
+            deleted: false,
+            delivery: "delivered".into(),
+            file_path: None,
         };
         let earlier = DirectMessageRecord {
             message_id: [1; 32],
@@ -571,13 +892,144 @@ mod tests {
             body: "earlier".into(),
             sent_at_unix: 10,
             outgoing: true,
+            reply_to: None,
+            edited: false,
+            deleted: false,
+            delivery: "pending".into(),
+            file_path: None,
         };
         assert!(store.save_direct_message(&later).expect("later"));
         assert!(store.save_direct_message(&earlier).expect("earlier"));
         assert!(!store.save_direct_message(&earlier).expect("duplicate"));
         assert_eq!(
             store.load_direct_messages(peer, 20).expect("history"),
-            vec![earlier, later]
+            vec![earlier.clone(), later.clone()]
         );
+        assert_eq!(
+            store.search_direct_messages("earlier", 10).expect("search"),
+            vec![earlier.clone()]
+        );
+        assert!(
+            store
+                .update_direct_message(earlier.message_id, peer, true, Some("edited text"), false)
+                .expect("edit")
+        );
+        let edited = store
+            .load_direct_messages(peer, 20)
+            .expect("edited history");
+        assert_eq!(edited[0].body, "edited text");
+        assert!(edited[0].edited);
+        assert!(
+            store
+                .set_direct_delivery(earlier.message_id, "delivered")
+                .expect("delivery")
+        );
+        assert!(
+            store
+                .delete_direct_message_local(later.message_id, peer)
+                .expect("local delete")
+        );
+        assert!(
+            store
+                .update_direct_message(earlier.message_id, peer, true, None, true)
+                .expect("delete")
+        );
+        assert!(store.load_direct_messages(peer, 20).expect("deleted")[0].deleted);
+    }
+
+    #[test]
+    fn persists_conversation_settings_and_call_events() {
+        let store = Store::in_memory(&DatabaseKey::from_bytes([6; 32])).expect("store");
+        let settings = ConversationSettings {
+            conversation_key: "direct:alice".into(),
+            pinned: true,
+            archived: false,
+            muted_until_unix: Some(100),
+            unread_count: 3,
+            last_summary: "hola".into(),
+            last_activity_unix: 99,
+            notification_preview: false,
+        };
+        store
+            .save_conversation_settings(&settings)
+            .expect("save settings");
+        assert_eq!(
+            store.load_conversation_settings().expect("settings"),
+            vec![settings]
+        );
+        store
+            .save_call_event(&CallEventRecord {
+                call_id: [7; 32],
+                conversation_key: "direct:alice".into(),
+                direction: "outgoing".into(),
+                outcome: "missed".into(),
+                started_at_unix: 10,
+                duration_ms: 0,
+            })
+            .expect("call event");
+        assert_eq!(
+            store.load_call_events("direct:alice", 10).expect("calls")[0].outcome,
+            "missed"
+        );
+    }
+
+    #[test]
+    fn migrates_a_v1_profile_without_losing_direct_history() {
+        let directory = std::env::temp_dir().join(format!(
+            "pptalk-storage-migration-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&directory).expect("temporary directory");
+        let database = directory.join("profile.db");
+        let key = DatabaseKey::from_bytes([8; 32]);
+        {
+            let connection = Connection::open(&database).expect("legacy database");
+            connection
+                .execute_batch(&format!(
+                    "PRAGMA key = \"x'{}'\";
+                     CREATE TABLE schema_meta (
+                       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                       version INTEGER NOT NULL
+                     );
+                     INSERT INTO schema_meta(singleton, version) VALUES (1, 1);
+                     CREATE TABLE direct_messages (
+                       message_id BLOB PRIMARY KEY,
+                       peer_identity BLOB NOT NULL,
+                       sender_name TEXT NOT NULL,
+                       body TEXT NOT NULL,
+                       sent_at_unix INTEGER NOT NULL,
+                       outgoing INTEGER NOT NULL
+                     ) WITHOUT ROWID;",
+                    hex::encode(key.expose_for_profile())
+                ))
+                .expect("legacy schema");
+            connection
+                .execute(
+                    "INSERT INTO direct_messages VALUES (?1, ?2, 'Alice', 'before migration', 10, 0)",
+                    params![[1_u8; 32].as_slice(), [2_u8; 32].as_slice()],
+                )
+                .expect("legacy message");
+        }
+
+        {
+            let store = Store::open(&database, &key).expect("migrated store");
+            let messages = store
+                .load_direct_messages(IdentityId::from_bytes([2; 32]), 10)
+                .expect("migrated history");
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].body, "before migration");
+            assert!(!messages[0].edited);
+            assert!(!messages[0].deleted);
+            assert_eq!(messages[0].delivery, "delivered");
+            assert_eq!(
+                store
+                    .search_direct_messages("migration", 10)
+                    .expect("migrated search")
+                    .len(),
+                1
+            );
+        }
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 }

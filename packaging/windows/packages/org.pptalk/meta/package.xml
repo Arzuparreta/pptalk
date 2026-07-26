@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <DisplayName>pptalk</DisplayName>
+    <Description>Cliente nativo de llamadas y chat cifrado local-first</Description>
+    <Version>@VERSION@</Version>
+    <ReleaseDate>2026-07-22</ReleaseDate>
+    <Default>true</Default>
+    <Essential>true</Essential>
+    <Script>installscript.qs</Script>
+</Package>

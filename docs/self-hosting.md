@@ -1,4 +1,7 @@
-# Montar un buzón propio
+# Buzón HTTP legado para desarrollo
+
+El cliente de escritorio ya no ofrece este componente como opción de producto.
+Se conserva para pruebas de compatibilidad y no se incluye en los instaladores.
 
 ## ¿Lo necesitas?
 
@@ -60,12 +63,9 @@ Los límites actuales son:
 - 256 MiB por capacidad;
 - 7 días de retención máxima.
 
-## Configurar los clientes
+## Usarlo con el cliente headless legado
 
-En el escritorio abre **⚙ → Nodo de buzón cifrado**, introduce la URL HTTPS y
-pulsa **Guardar**.
-
-Para un perfil headless:
+El escritorio no expone este ajuste. Para una prueba headless:
 
 ```sh
 pptalk-cli init --profile alice.json --name Alice \

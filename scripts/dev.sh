@@ -30,12 +30,13 @@ usage() {
 Uso: ./scripts/dev.sh <comando> [opciones]
 
 Comandos:
-  start [--node-only] [--no-build]  Compila y arranca nodo + cliente nativo
+  start [--with-node|--node-only] [--no-build]
+                                    Arranca el cliente; el nodo legado es opcional
   stop                              Para los procesos gestionados por el script
   restart [opciones de start]       Reinicia el entorno
   status                            Muestra procesos, URL y estado de salud
   logs [node|desktop] [-f]          Muestra los logs (con -f, los sigue)
-  build [--node-only]               Compila los binarios de desarrollo
+  build [--with-node|--node-only]   Compila los binarios de desarrollo
   doctor                            Ejecuta el diagnóstico del CLI
   help                              Muestra esta ayuda
 
@@ -91,9 +92,15 @@ managed_pid() {
 }
 
 build_rust() {
+    local include_node="${1:-false}"
     require_command cargo
-    printf 'Compilando CLI y nodo...\n'
-    (cd "$REPO_ROOT" && cargo build --locked -p pptalk-cli -p pptalk-node)
+    if [[ "$include_node" == true ]]; then
+        printf 'Compilando CLI y nodo legado...\n'
+        (cd "$REPO_ROOT" && cargo build --locked -p pptalk-cli -p pptalk-node)
+    else
+        printf 'Compilando CLI...\n'
+        (cd "$REPO_ROOT" && cargo build --locked -p pptalk-cli)
+    fi
 }
 
 build_desktop() {
@@ -108,7 +115,8 @@ build_desktop() {
 
 build_all() {
     local node_only="${1:-false}"
-    build_rust
+    local with_node="${2:-false}"
+    build_rust "$with_node"
     if [[ "$node_only" != true ]]; then
         build_desktop
     fi
@@ -171,7 +179,6 @@ start_desktop() {
     : >"$DESKTOP_LOG"
     nohup env \
         PPTALK_CLI="$CLI_BIN" \
-        PPTALK_MAILBOX_URL="$NODE_URL" \
         "$DESKTOP_BIN" >>"$DESKTOP_LOG" 2>&1 &
     pid=$!
     printf '%s\n' "$pid" >"$DESKTOP_PID_FILE"
@@ -292,10 +299,12 @@ show_logs() {
 
 parse_mode_flags() {
     NODE_ONLY=false
+    WITH_NODE=false
     NO_BUILD=false
     while (($#)); do
         case "$1" in
-            --node-only) NODE_ONLY=true ;;
+            --node-only) NODE_ONLY=true; WITH_NODE=true ;;
+            --with-node) WITH_NODE=true ;;
             --no-build) NO_BUILD=true ;;
             *) die "opción desconocida: $1" ;;
         esac
@@ -309,17 +318,19 @@ command_start() {
     STARTED_DESKTOP=false
     ROLLBACK_ON_EXIT=true
     trap rollback_start EXIT
-    require_command curl
+    if [[ "$WITH_NODE" == true ]]; then require_command curl; fi
     if [[ "$NO_BUILD" != true ]]; then
-        build_all "$NODE_ONLY"
+        build_all "$NODE_ONLY" "$WITH_NODE"
     else
-        [[ -x "$NODE_BIN" ]] || die "no existe $NODE_BIN; ejecuta start sin --no-build"
+        if [[ "$WITH_NODE" == true ]]; then
+            [[ -x "$NODE_BIN" ]] || die "no existe $NODE_BIN; ejecuta start sin --no-build"
+        fi
         if [[ "$NODE_ONLY" != true ]]; then
             [[ -x "$CLI_BIN" ]] || die "no existe $CLI_BIN; ejecuta start sin --no-build"
             [[ -x "$DESKTOP_BIN" ]] || die "no existe $DESKTOP_BIN; ejecuta start sin --no-build"
         fi
     fi
-    start_node
+    if [[ "$WITH_NODE" == true ]]; then start_node; fi
     if [[ "$NODE_ONLY" != true ]]; then
         start_desktop
     fi
@@ -331,7 +342,7 @@ command_start() {
 command_build() {
     parse_mode_flags "$@"
     [[ "$NO_BUILD" == false ]] || die "--no-build no es válido con build"
-    build_all "$NODE_ONLY"
+    build_all "$NODE_ONLY" "$WITH_NODE"
 }
 
 command_logs() {
@@ -360,7 +371,7 @@ main() {
         build) command_build "$@" ;;
         doctor)
             (($# == 0)) || die "doctor no acepta opciones"
-            build_rust
+            build_rust false
             "$CLI_BIN" doctor
             ;;
         help|-h|--help) usage ;;

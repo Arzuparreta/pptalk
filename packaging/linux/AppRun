@@ -1,0 +1,5 @@
+#!/bin/sh
+appdir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$appdir/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_SCANNER="$appdir/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+exec "$appdir/usr/bin/pptalk-desktop" "$@"

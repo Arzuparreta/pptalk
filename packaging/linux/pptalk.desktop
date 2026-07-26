@@ -2,7 +2,7 @@
 Type=Application
 Name=pptalk
 Comment=Private peer-to-peer conversations
-Exec=pptalk-desktop
+Exec=pptalk-desktop %u
 Icon=pptalk
 Categories=Network;Chat;AudioVideo;
 Terminal=false

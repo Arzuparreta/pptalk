@@ -1,0 +1,30 @@
+# Maintainer: pptalk contributors
+pkgname=pptalk-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Native local-first encrypted calls and chat'
+arch=('x86_64')
+url='https://github.com/Arzuparreta/pptalk'
+license=('GPL-3.0-or-later')
+depends=('fuse2')
+provides=('pptalk')
+conflicts=('pptalk')
+options=('!strip')
+_appimage="pptalk-v${pkgver}-linux-x86_64.AppImage"
+source=("${_appimage}::${url}/releases/download/v${pkgver}/${_appimage}")
+sha256sums=('@SHA256@')
+
+prepare() {
+  chmod +x "${srcdir}/${_appimage}"
+  "${srcdir}/${_appimage}" --appimage-extract >/dev/null
+}
+
+package() {
+  install -Dm755 "${srcdir}/${_appimage}" "${pkgdir}/opt/pptalk/pptalk.AppImage"
+  install -dm755 "${pkgdir}/usr/bin"
+  ln -s /opt/pptalk/pptalk.AppImage "${pkgdir}/usr/bin/pptalk"
+  install -Dm644 "${srcdir}/squashfs-root/usr/share/applications/pptalk.desktop" \
+    "${pkgdir}/usr/share/applications/pptalk.desktop"
+  install -Dm644 "${srcdir}/squashfs-root/usr/share/icons/hicolor/scalable/apps/pptalk.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/pptalk.svg"
+}

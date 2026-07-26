@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Widgets)
 qt_standard_project_setup(REQUIRES 6.8)
 
 qt_add_executable(pptalk-desktop
@@ -14,6 +14,13 @@ qt_add_executable(pptalk-desktop
     src/AppController.cpp
     src/AppController.hpp
 )
+
+set(PPTALK_PLATFORM_QML_FILES)
+if(WIN32)
+    list(APPEND PPTALK_PLATFORM_QML_FILES
+        qml/components/WindowsAutostartSetting.qml
+    )
+endif()
 
 qt_add_qml_module(pptalk-desktop
     URI Pptalk
@@ -23,6 +30,7 @@ qt_add_qml_module(pptalk-desktop
         qml/components/Avatar.qml
         qml/components/ChatBubble.qml
         qml/components/IconButton.qml
+        ${PPTALK_PLATFORM_QML_FILES}
 )
 
 target_link_libraries(pptalk-desktop PRIVATE
@@ -31,6 +39,7 @@ target_link_libraries(pptalk-desktop PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
 )
 
 target_compile_definitions(pptalk-desktop PRIVATE

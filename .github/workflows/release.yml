@@ -25,12 +25,33 @@ jobs:
           version: '6.8.*'
           cache: true
       - run: sudo apt-get update
-      - run: sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev zstd
+      - run: >-
+          sudo apt-get install -y
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+          gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+          gstreamer1.0-libav gstreamer1.0-pulseaudio
+      - name: Install AppImage tools
+        shell: bash
+        run: |
+          case '${{ matrix.arch }}' in
+            x86_64) appimage_arch=x86_64 ;;
+            arm64) appimage_arch=aarch64 ;;
+          esac
+          curl -fL "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${appimage_arch}.AppImage" -o "$RUNNER_TEMP/linuxdeploy"
+          curl -fL "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${appimage_arch}.AppImage" -o "$RUNNER_TEMP/linuxdeploy-plugin-qt"
+          chmod +x "$RUNNER_TEMP/linuxdeploy" "$RUNNER_TEMP/linuxdeploy-plugin-qt"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}"
+        env:
+          PPTALK_ARTIFACT_ARCH: ${{ matrix.arch }}
+          APPIMAGE_EXTRACT_AND_RUN: '1'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
-          path: build/*.tar.zst
+          path: |
+            build/*.AppImage
+            build/*.AppImage.zsync
 
   windows:
     runs-on: windows-2025
@@ -41,6 +62,7 @@ jobs:
         with:
           version: '6.8.*'
           cache: true
+          tools: tools_ifw
       - name: Install GStreamer 1.28 SDK
         shell: pwsh
         run: |
@@ -53,7 +75,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: build/*.zip
+          path: build/*.exe
 
   publish:
     needs: [linux, windows]

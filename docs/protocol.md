@@ -29,14 +29,19 @@ La membresía guarda desde qué momento puede leer cada identidad; un miembro
 nuevo no puede pedir historia anterior a su admisión. Otro dispositivo de una
 identidad existente conserva ese límite, pero recibe una hoja MLS diferente.
 
+Los mensajes directos incluyen un ID estable y, opcionalmente, el ID al que
+responden. Edición y eliminación son operaciones firmadas por el autor original.
+La confirmación de entrega significa persistencia en el receptor; no existe
+confirmación de lectura.
+
 ## Archivos
 
 El manifiesto incluye hashes del ciphertext completo y de cada chunk. El
 receptor puede aceptar chunks desordenados, deduplicarlos y ensamblarlos de forma
 atómica solo cuando todas las verificaciones son correctas.
 
-Si la ruta directa falla durante una transferencia, los chunks restantes pueden
-pasar al buzón sin cambiar el contenido cifrado.
+Si la ruta directa falla durante una transferencia, los chunks restantes quedan
+en el outbox local hasta el siguiente intento.
 
 ## Llamadas
 
@@ -45,13 +50,14 @@ pasar al buzón sin cambiar el contenido cifrado.
 - invitación con timbre;
 - apertura de sala sin timbre;
 - entrada y salida;
+- rechazo, llamada perdida, retención y reanudación;
 - activación de micrófono, cámara o pantalla.
 
 Las señales viajan separadas de los datagramas multimedia. Una llamada de grupo
 replica el stream codificado a los peers de una malla. Hay variantes reservadas
 para SDP/ICE y ofertas de router, pero la versión actual no anuncia un SFU.
 
-## Buzón
+## Buzón legado y spike distribuido
 
 El acceso es por capacidad. La ruta contiene un token aleatorio de 32 bytes en
 hexadecimal:
@@ -67,6 +73,11 @@ deduplica por ID si una respuesta se pierde y el envío se repite.
 La capacidad es direccional y no identifica una cuenta global. El nodo impone
 tamaño, cuota y caducidad, pero no puede descifrar ni validar el contenido de la
 conversación.
+
+Esta API se mantiene para compatibilidad y pruebas, pero no se anuncia ni se
+configura desde el escritorio. `crates/distributed` contiene la prueba Veilid de
+8 MiB máximos y 30 días de caducidad; no se integra mientras un segundo nodo no
+pueda publicar, recuperar y cerrar limpiamente de forma repetible.
 
 ## Evolución del estado local
 

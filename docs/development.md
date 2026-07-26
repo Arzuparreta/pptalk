@@ -6,15 +6,16 @@ consulta [instalación](installation.md) y [guía de uso](user-guide.md).
 ## Entorno local
 
 ```sh
-./scripts/dev.sh start              # compila y arranca nodo + escritorio
-./scripts/dev.sh status             # muestra PIDs, health y URL
+./scripts/dev.sh start              # compila y arranca el escritorio
+./scripts/dev.sh start --with-node  # añade el buzón HTTP legado
+./scripts/dev.sh status             # muestra PIDs gestionados
 ./scripts/dev.sh logs desktop -f    # sigue el cliente y su backend
 ./scripts/dev.sh logs node -f       # sigue el buzón local
 ./scripts/dev.sh restart --no-build # reinicia sin recompilar
 ./scripts/dev.sh stop               # para solo procesos de este repo
 ```
 
-Usa `start --node-only` en una sesión sin entorno gráfico. La ayuda integrada
+Usa `start --node-only` solo para trabajar en el nodo legado. La ayuda integrada
 documenta `PPTALK_DEV_LISTEN`, `PPTALK_DEV_NODE_URL`, `PPTALK_DEV_DATA_DIR`,
 `PPTALK_DEV_STATE_DIR` y `CARGO_TARGET_DIR`.
 
@@ -78,5 +79,6 @@ ambos lados.
 - `crates/storage`: SQLCipher y outbox.
 - `crates/media`: captura y política multimedia GStreamer.
 - `crates/protocol`: tipos CBOR versionados.
+- `crates/distributed`: spike Veilid aislado de la ruta de producción.
 
 Las reglas internas para agentes y mantenedores están en [AGENTS.md](../AGENTS.md).

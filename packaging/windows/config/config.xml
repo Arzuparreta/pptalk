@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>pptalk</Name>
+    <Version>@VERSION@</Version>
+    <Title>Instalar pptalk</Title>
+    <Publisher>pptalk contributors</Publisher>
+    <StartMenuDir>pptalk</StartMenuDir>
+    <TargetDir>@HomeDir@/pptalk</TargetDir>
+    <MaintenanceToolName>pptalk-maintenance</MaintenanceToolName>
+</Installer>

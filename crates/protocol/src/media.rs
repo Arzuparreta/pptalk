@@ -92,6 +92,17 @@ pub enum CallSignal {
     Join {
         call_id: CallId,
     },
+    Reject {
+        call_id: CallId,
+        #[serde(default)]
+        missed: bool,
+    },
+    Hold {
+        call_id: CallId,
+    },
+    Resume {
+        call_id: CallId,
+    },
     Leave {
         call_id: CallId,
     },

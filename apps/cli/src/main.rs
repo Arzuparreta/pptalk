@@ -30,7 +30,9 @@ use pptalk_protocol::{
     MediaSignal, MessageContent, PROTOCOL_VERSION, QualityMode, QualityProfile, ReachabilityRecord,
     TransportEnvelope, WireDecode, WireEncode,
 };
-use pptalk_storage::{DatabaseKey, DirectMessageRecord, Store};
+use pptalk_storage::{
+    CallEventRecord, ConversationSettings, DatabaseKey, DirectMessageRecord, Store,
+};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
@@ -141,6 +143,8 @@ enum Command {
 struct Profile {
     version: u16,
     name: String,
+    #[serde(default)]
+    avatar: Option<String>,
     identity_id: IdentityId,
     device_secret: [u8; 32],
     network_secret: [u8; 32],
@@ -158,8 +162,11 @@ struct Profile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Flat fields keep existing profile JSON migratable.
 struct Contact {
     name: String,
+    #[serde(default)]
+    avatar: Option<String>,
     identity_id: IdentityId,
     device_id: DeviceId,
     public_key: [u8; 32],
@@ -172,6 +179,12 @@ struct Contact {
     mls_key_package: Vec<u8>,
     #[serde(default)]
     identity_events: Vec<IdentityEvent>,
+    #[serde(default)]
+    blocked: bool,
+    #[serde(default)]
+    removed: bool,
+    #[serde(default)]
+    hide_presence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +192,8 @@ struct GroupProfile {
     id: ConversationId,
     name: String,
     owner: IdentityId,
+    #[serde(default)]
+    admins: Vec<IdentityId>,
     members: Vec<IdentityId>,
     #[serde(default)]
     member_devices: Vec<DeviceId>,
@@ -196,6 +211,8 @@ struct PendingInvite {
 struct ChatPacket {
     version: u16,
     sender_name: String,
+    #[serde(default)]
+    sender_avatar: Option<String>,
     sender_identity: IdentityId,
     sender_device: DeviceId,
     sender_public_key: [u8; 32],
@@ -215,8 +232,25 @@ struct ChatPacket {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum DirectPayload {
     DeviceHello,
+    DeviceHistory {
+        messages: Vec<DeviceHistoryMessage>,
+    },
     Message {
+        #[serde(default)]
+        message_id: [u8; 32],
         body: String,
+        #[serde(default)]
+        reply_to: Option<[u8; 32]>,
+    },
+    MessageEdit {
+        target: [u8; 32],
+        body: String,
+    },
+    MessageDelete {
+        target: [u8; 32],
+    },
+    DeliveryReceipt {
+        target: [u8; 32],
     },
     FileOffer {
         transfer_id: [u8; 32],
@@ -238,6 +272,12 @@ enum DirectPayload {
     GroupCommit {
         group: GroupProfile,
         commit: Vec<u8>,
+    },
+    GroupProfileUpdate {
+        group: GroupProfile,
+    },
+    GroupDissolve {
+        group_id: ConversationId,
     },
     GroupFileOffer {
         group_id: ConversationId,
@@ -262,6 +302,20 @@ enum DirectPayload {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceHistoryMessage {
+    message_id: [u8; 32],
+    peer_identity: IdentityId,
+    sender_name: String,
+    body: String,
+    sent_at_unix: i64,
+    outgoing: bool,
+    reply_to: Option<[u8; 32]>,
+    edited: bool,
+    deleted: bool,
+    delivery: String,
+}
+
 #[derive(Debug, Default)]
 struct IncomingFile {
     secret: Option<[u8; 32]>,
@@ -276,6 +330,8 @@ struct ActiveCall {
     id: CallId,
     label: String,
     recipients: Vec<Contact>,
+    started_at_unix: i64,
+    connected_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +339,8 @@ struct DeviceBundle {
     version: u16,
     expires_unix: i64,
     name: String,
+    #[serde(default)]
+    avatar: Option<String>,
     identity_id: IdentityId,
     device_secret: [u8; 32],
     network_secret: [u8; 32],
@@ -337,7 +395,30 @@ async fn main() -> Result<()> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum DaemonCommand {
+    CheckUpdate,
     Contacts,
+    UpdateProfile {
+        name: String,
+        #[serde(default, deserialize_with = "deserialize_avatar_update")]
+        avatar: AvatarUpdate,
+    },
+    RemoveContact {
+        identity_id: String,
+    },
+    SetContactBlocked {
+        identity_id: String,
+        blocked: bool,
+    },
+    SetContactPrivacy {
+        identity_id: String,
+        hide_presence: bool,
+    },
+    SetConversationPreference {
+        conversation_key: String,
+        pinned: bool,
+        archived: bool,
+        muted: bool,
+    },
     Groups,
     Devices,
     SetMailbox {
@@ -353,8 +434,14 @@ enum DaemonCommand {
     History {
         contact: String,
     },
+    Search {
+        query: String,
+    },
     Invite {
         expires_seconds: Option<i64>,
+    },
+    PreviewInvite {
+        url: Url,
     },
     Accept {
         url: Url,
@@ -362,6 +449,21 @@ enum DaemonCommand {
     Send {
         contact: String,
         message: String,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
+    EditMessage {
+        contact: String,
+        message_id: String,
+        message: String,
+    },
+    DeleteMessage {
+        contact: String,
+        message_id: String,
+    },
+    DeleteMessageLocal {
+        contact: String,
+        message_id: String,
     },
     SendFile {
         contact: String,
@@ -377,6 +479,17 @@ enum DaemonCommand {
     GroupSend {
         group_id: String,
         message: String,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
+    GroupEditMessage {
+        group_id: String,
+        message_id: String,
+        message: String,
+    },
+    GroupDeleteMessage {
+        group_id: String,
+        message_id: String,
     },
     GroupSendFile {
         group_id: String,
@@ -390,6 +503,18 @@ enum DaemonCommand {
         group_id: String,
         contact: String,
     },
+    GroupSetAdmin {
+        group_id: String,
+        contact: String,
+        admin: bool,
+    },
+    GroupTransferOwnership {
+        group_id: String,
+        contact: String,
+    },
+    GroupDissolve {
+        group_id: String,
+    },
     StartCall {
         contact: String,
         ring: bool,
@@ -398,9 +523,23 @@ enum DaemonCommand {
         contact: String,
         call_id: String,
     },
+    RejectCall {
+        contact: String,
+        call_id: String,
+        #[serde(default)]
+        missed: bool,
+    },
+    HoldCall {
+        call_id: String,
+    },
+    ResumeCall {
+        call_id: String,
+    },
     LeaveCall {
         contact: String,
         call_id: String,
+        #[serde(default)]
+        missed: bool,
     },
     SetMedia {
         contact: String,
@@ -410,6 +549,24 @@ enum DaemonCommand {
         profile: Option<QualityProfile>,
     },
     Shutdown,
+}
+
+#[derive(Debug, Default)]
+enum AvatarUpdate {
+    #[default]
+    Preserve,
+    Set(String),
+    Clear,
+}
+
+fn deserialize_avatar_update<'de, D>(deserializer: D) -> std::result::Result<AvatarUpdate, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<String>::deserialize(deserializer)? {
+        Some(value) => AvatarUpdate::Set(value),
+        None => AvatarUpdate::Clear,
+    })
 }
 
 fn doctor() {
@@ -440,6 +597,7 @@ fn initialize(path: &Path, name: String, mailbox_url: Option<Url>) -> Result<()>
     let profile = Profile {
         version: PROTOCOL_VERSION,
         name,
+        avatar: None,
         identity_id: identity.identity_id(),
         device_secret: key.secret_bytes(),
         network_secret,
@@ -531,6 +689,7 @@ fn accept_invite(path: &Path, url: &Url) -> Result<()> {
         &mut profile,
         Contact {
             name: invite.display_name,
+            avatar: None,
             identity_id: invite.inviter_identity,
             device_id: invite.inviter_device,
             public_key: invite.inviter_device_public_key,
@@ -540,6 +699,9 @@ fn accept_invite(path: &Path, url: &Url) -> Result<()> {
             verified: true,
             mls_key_package: vec![],
             identity_events: vec![],
+            blocked: false,
+            removed: false,
+            hide_presence: false,
         },
     );
     save_profile(path, &profile)?;
@@ -559,7 +721,9 @@ async fn send_message(path: &Path, name: &str, message: &str) -> Result<()> {
         &key,
         &profile,
         DirectPayload::Message {
+            message_id: random_message_id(),
             body: message.into(),
+            reply_to: None,
         },
     )?;
     for recipient in &recipients {
@@ -586,6 +750,7 @@ async fn listen(path: &Path) -> Result<()> {
                         if was_pending {
                             upsert_contact(&mut profile, Contact {
                                 name: packet.sender_name.clone(),
+                                avatar: None,
                                 identity_id: packet.sender_identity,
                                 device_id: packet.sender_device,
                                 public_key: packet.sender_public_key,
@@ -595,6 +760,9 @@ async fn listen(path: &Path) -> Result<()> {
                                 verified: true,
                                 mls_key_package: packet.mls_key_package.clone(),
                                 identity_events: packet.identity_events.clone(),
+                                blocked: false,
+                                removed: false,
+                                hide_presence: false,
                             });
                             profile.pending_invites.retain(|pending| pending.shared_secret != shared_secret);
                             save_profile(path, &profile)?;
@@ -613,7 +781,7 @@ async fn listen(path: &Path) -> Result<()> {
                     Err(error) => eprintln!("rejected incoming envelope: {error:#}"),
                 }
             }
-            _ = mailbox_tick.tick() => {
+            _ = mailbox_tick.tick(), if profile.mailbox_url.is_some() => {
                 match drain_mailbox(&profile).await {
                     Ok(messages) => for bytes in messages {
                         match decrypt_incoming(&profile, &bytes) {
@@ -621,6 +789,7 @@ async fn listen(path: &Path) -> Result<()> {
                                 if was_pending {
                                     upsert_contact(&mut profile, Contact {
                                         name: packet.sender_name.clone(),
+                                        avatar: None,
                                         identity_id: packet.sender_identity,
                                         device_id: packet.sender_device,
                                         public_key: packet.sender_public_key,
@@ -630,6 +799,9 @@ async fn listen(path: &Path) -> Result<()> {
                                         verified: true,
                                         mls_key_package: packet.mls_key_package.clone(),
                                         identity_events: packet.identity_events.clone(),
+                                        blocked: false,
+                                        removed: false,
+                                        hide_presence: false,
                                     });
                                     profile.pending_invites.retain(|pending| pending.shared_secret != shared_secret);
                                     save_profile(path, &profile)?;
@@ -670,6 +842,7 @@ async fn daemon(path: &Path) -> Result<()> {
     let network = PeerNetwork::start_with_secret(profile.network_secret).await?;
     let media = Arc::new(GstMediaEngine::new()?);
     let mut active_call: Option<ActiveCall> = None;
+    let mut held_call: Option<ActiveCall> = None;
     let mut media_tasks: Vec<(MediaKind, tokio::task::JoinHandle<()>)> = Vec::new();
     let mut incoming_files = std::collections::BTreeMap::<[u8; 32], IncomingFile>::new();
     let mls_snapshot_id = ConversationId::from_bytes([0x6d; 32]);
@@ -696,11 +869,13 @@ async fn daemon(path: &Path) -> Result<()> {
         "event":"ready",
         "identity_id":profile.identity_id,
         "name":profile.name,
+        "avatar":profile.avatar,
         "address":network.local_address()
     }))?;
     emit_contacts(&profile)?;
     emit_groups(&profile)?;
     emit_devices(&profile)?;
+    emit_conversation_settings(&store)?;
     for recipient in &profile.contacts {
         if let Err(error) = deliver_payload(
             &network,
@@ -749,7 +924,106 @@ async fn daemon(path: &Path) -> Result<()> {
                     }
                 };
                 match command {
+                    DaemonCommand::CheckUpdate => {
+                        match check_for_update().await {
+                            Ok(update) => emit_json(&update)?,
+                            Err(error) => tracing::debug!(%error, "update check failed"),
+                        }
+                    }
                     DaemonCommand::Contacts => emit_contacts(&profile)?,
+                    DaemonCommand::UpdateProfile { name, avatar } => {
+                        let name = name.trim();
+                        if name.is_empty() || name.chars().count() > 64 {
+                            emit_json(&serde_json::json!({"event":"error", "message":"name must contain 1-64 characters"}))?;
+                            continue;
+                        }
+                        if matches!(&avatar, AvatarUpdate::Set(value) if value.len() > 512 * 1024) {
+                            emit_json(&serde_json::json!({"event":"error", "message":"avatar exceeds 512 KiB"}))?;
+                            continue;
+                        }
+                        profile.name = name.to_owned();
+                        match avatar {
+                            AvatarUpdate::Set(value) => {
+                                profile.avatar = (!value.is_empty()).then_some(value);
+                            }
+                            AvatarUpdate::Clear => profile.avatar = None,
+                            AvatarUpdate::Preserve => {}
+                        }
+                        save_profile(path, &profile)?;
+                        for recipient in profile.contacts.iter().filter(|contact| {
+                            contact.identity_id != profile.identity_id
+                                && !contact.removed
+                                && !contact.blocked
+                        }) {
+                            if let Err(error) = deliver_payload(
+                                &network,
+                                &key,
+                                &profile,
+                                recipient,
+                                DirectPayload::DeviceHello,
+                            )
+                            .await
+                            {
+                                tracing::debug!(%error, contact = %recipient.name, "profile update deferred");
+                            }
+                        }
+                        emit_json(&serde_json::json!({"event":"profile", "name":profile.name, "avatar":profile.avatar}))?;
+                    }
+                    DaemonCommand::RemoveContact { identity_id } => {
+                        let identity = daemon_or_continue!(identity_id.parse::<IdentityId>().context("invalid identity id"));
+                        let mut changed = false;
+                        for contact in profile.contacts.iter_mut().filter(|contact| contact.identity_id == identity) {
+                            contact.removed = true;
+                            changed = true;
+                        }
+                        if changed {
+                            save_profile(path, &profile)?;
+                            emit_contacts(&profile)?;
+                        }
+                    }
+                    DaemonCommand::SetContactBlocked { identity_id, blocked } => {
+                        let identity = daemon_or_continue!(identity_id.parse::<IdentityId>().context("invalid identity id"));
+                        let mut changed = false;
+                        for contact in profile.contacts.iter_mut().filter(|contact| contact.identity_id == identity) {
+                            contact.blocked = blocked;
+                            changed = true;
+                        }
+                        if changed {
+                            save_profile(path, &profile)?;
+                            emit_contacts(&profile)?;
+                        }
+                    }
+                    DaemonCommand::SetContactPrivacy { identity_id, hide_presence } => {
+                        let identity = daemon_or_continue!(identity_id.parse::<IdentityId>().context("invalid identity id"));
+                        let mut changed = false;
+                        for contact in profile.contacts.iter_mut().filter(|contact| contact.identity_id == identity) {
+                            contact.hide_presence = hide_presence;
+                            changed = true;
+                        }
+                        if changed {
+                            save_profile(path, &profile)?;
+                            emit_contacts(&profile)?;
+                        }
+                    }
+                    DaemonCommand::SetConversationPreference { conversation_key, pinned, archived, muted } => {
+                        if conversation_key.trim().is_empty() || conversation_key.len() > 128 {
+                            emit_json(&serde_json::json!({"event":"error", "message":"invalid conversation key"}))?;
+                            continue;
+                        }
+                        let previous = store.load_conversation_settings()?.into_iter()
+                            .find(|settings| settings.conversation_key == conversation_key);
+                        store.save_conversation_settings(&ConversationSettings {
+                            conversation_key,
+                            pinned,
+                            archived,
+                            muted_until_unix: muted.then_some(i64::MAX),
+                            unread_count: previous.as_ref().map_or(0, |settings| settings.unread_count),
+                            last_summary: previous.as_ref().map_or_else(String::new, |settings| settings.last_summary.clone()),
+                            last_activity_unix: previous.as_ref().map_or(0, |settings| settings.last_activity_unix),
+                            notification_preview: previous.as_ref().is_none_or(|settings| settings.notification_preview),
+                        })?;
+                        emit_conversation_settings(&store)?;
+                    }
                     DaemonCommand::Groups => emit_groups(&profile)?,
                     DaemonCommand::Devices => emit_devices(&profile)?,
                     DaemonCommand::SetMailbox { url } => {
@@ -800,6 +1074,51 @@ async fn daemon(path: &Path) -> Result<()> {
                             continue;
                         };
                         emit_history(&store, peer)?;
+                        emit_call_history(&store, &peer.name)?;
+                    }
+                    DaemonCommand::Search { query } => {
+                        if query.trim().is_empty() {
+                            emit_json(&serde_json::json!({"event":"search_results", "query":query, "results":[]}))?;
+                            continue;
+                        }
+                        let direct = daemon_or_continue!(store.search_direct_messages(query.trim(), 100));
+                        let mut results = direct.iter().map(|message| {
+                            let mut value = direct_message_json(message);
+                            if let Some(object) = value.as_object_mut() {
+                                object.insert("conversation_type".into(), "direct".into());
+                                object.insert("conversation_key".into(), message.peer_identity.to_string().into());
+                            }
+                            value
+                        }).collect::<Vec<_>>();
+                        let needle = query.trim().to_lowercase();
+                        for group in &profile.groups {
+                            let messages = daemon_or_continue!(materialize_group_messages(
+                                &store, &profile, group.id
+                            ));
+                            for mut message in messages {
+                                let matches = message.get("body").and_then(serde_json::Value::as_str)
+                                    .is_some_and(|body| body.to_lowercase().contains(&needle));
+                                let deleted = message.get("deleted").and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                if !matches || deleted { continue; }
+                                if let Some(object) = message.as_object_mut() {
+                                    let author = object.get("author").and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default().to_owned();
+                                    object.insert("author".into(), format!("{} · {author}", group.name).into());
+                                    object.insert("conversation_type".into(), "group".into());
+                                    object.insert("conversation_key".into(), group.id.to_string().into());
+                                }
+                                results.push(message);
+                            }
+                        }
+                        results.sort_by_key(|message| std::cmp::Reverse(
+                            message.get("sent_at").and_then(serde_json::Value::as_i64).unwrap_or_default()
+                        ));
+                        results.truncate(100);
+                        emit_json(&serde_json::json!({
+                            "event":"search_results", "query":query,
+                            "results":results
+                        }))?;
                     }
                     DaemonCommand::Invite { expires_seconds } => {
                         let seconds = expires_seconds.unwrap_or(3600);
@@ -835,6 +1154,17 @@ async fn daemon(path: &Path) -> Result<()> {
                         save_profile(path, &profile)?;
                         emit_json(&serde_json::json!({"event":"invite", "url":invite.to_url()?, "expires_unix":expires}))?;
                     }
+                    DaemonCommand::PreviewInvite { url } => {
+                        let invite = daemon_or_continue!(ContactInvite::from_url(
+                            &url, OffsetDateTime::now_utc()
+                        ));
+                        daemon_or_continue!(verify_invite(&invite));
+                        emit_json(&serde_json::json!({
+                            "event":"invite_preview", "url":url,
+                            "name":invite.display_name, "expires_unix":invite.expires_unix,
+                            "identity_id":invite.inviter_identity
+                        }))?;
+                    }
                     DaemonCommand::Accept { url } => {
                         let invite = daemon_or_continue!(ContactInvite::from_url(
                             &url, OffsetDateTime::now_utc()
@@ -847,6 +1177,7 @@ async fn daemon(path: &Path) -> Result<()> {
                         };
                         upsert_contact(&mut profile, Contact {
                             name: invite.display_name,
+                            avatar: None,
                             identity_id: invite.inviter_identity,
                             device_id: invite.inviter_device,
                             public_key: invite.inviter_device_public_key,
@@ -856,11 +1187,14 @@ async fn daemon(path: &Path) -> Result<()> {
                             verified: true,
                             mls_key_package: vec![],
                             identity_events: vec![],
+                            blocked: false,
+                            removed: false,
+                            hide_presence: false,
                         });
                         save_profile(path, &profile)?;
                         emit_contacts(&profile)?;
                     }
-                    DaemonCommand::Send { contact, message } => {
+                    DaemonCommand::Send { contact, message, reply_to } => {
                         let recipients = match contact_devices(&profile, &contact) {
                             Ok(recipients) => recipients,
                             Err(error) => {
@@ -872,9 +1206,18 @@ async fn daemon(path: &Path) -> Result<()> {
                             emit_json(&serde_json::json!({"event":"error", "message":"message must contain 1 byte to 64 KiB"}))?;
                             continue;
                         }
+                        let message_id = random_message_id();
+                        let reply_to = match reply_to.as_deref().map(parse_message_id).transpose() {
+                            Ok(reply_to) => reply_to,
+                            Err(error) => {
+                                emit_json(&serde_json::json!({"event":"error", "message":error.to_string()}))?;
+                                continue;
+                            }
+                        };
                         let mut packet = ChatPacket {
                             version: PROTOCOL_VERSION,
                             sender_name: profile.name.clone(),
+                            sender_avatar: profile.avatar.clone(),
                             sender_identity: profile.identity_id,
                             sender_device: key.device_id(),
                             sender_public_key: key.public_key(),
@@ -883,7 +1226,11 @@ async fn daemon(path: &Path) -> Result<()> {
                             mailbox_urls: profile.mailbox_url.clone().into_iter().collect(),
                             mls_key_package: profile.mls_key_package.clone(),
                             sent_at_unix: OffsetDateTime::now_utc().unix_timestamp(),
-                            payload: DirectPayload::Message { body: message.clone() },
+                            payload: DirectPayload::Message {
+                                message_id,
+                                body: message.clone(),
+                                reply_to,
+                            },
                             signature: vec![],
                         };
                         packet.signature = key.sign_message(&packet.to_wire()?);
@@ -912,18 +1259,78 @@ async fn daemon(path: &Path) -> Result<()> {
                         }.await;
                         match delivery {
                             Ok(delivery) => {
-                                let packet_bytes = packet.to_wire()?;
                                 store.save_direct_message(&DirectMessageRecord {
-                                    message_id: *blake3::hash(&packet_bytes).as_bytes(),
+                                    message_id,
                                     peer_identity: recipients[0].identity_id,
                                     sender_name: profile.name.clone(),
                                     body: message.clone(),
                                     sent_at_unix: packet.sent_at_unix,
                                     outgoing: true,
+                                    reply_to,
+                                    edited: false,
+                                    deleted: false,
+                                    delivery: delivery.to_owned(),
+                                    file_path: None,
                                 })?;
-                                emit_json(&serde_json::json!({"event":"message_sent", "to":recipients[0].name, "devices":recipients.len(), "body":message, "sent_at":packet.sent_at_unix, "delivery":delivery}))?;
+                                emit_json(&serde_json::json!({"event":"message_sent", "message_id":hex::encode(message_id), "to":recipients[0].name, "devices":recipients.len(), "body":message, "sent_at":packet.sent_at_unix, "delivery":delivery, "reply_to":reply_to.map(hex::encode)}))?;
                             }
                             Err(error) => emit_json(&serde_json::json!({"event":"error", "message":error.to_string()}))?,
+                        }
+                    }
+                    DaemonCommand::EditMessage { contact, message_id, message } => {
+                        if message.is_empty() || message.len() > 64 * 1024 {
+                            emit_json(&serde_json::json!({"event":"error", "message":"message must contain 1 byte to 64 KiB"}))?;
+                            continue;
+                        }
+                        let target = daemon_or_continue!(parse_message_id(&message_id));
+                        let recipients = daemon_or_continue!(contact_devices(&profile, &contact));
+                        let conversation_id = direct_conversation_id(profile.identity_id, recipients[0].identity_id);
+                        let packet = daemon_or_continue!(signed_direct_packet(
+                            &network, &key, &profile,
+                            DirectPayload::MessageEdit { target, body: message.clone() },
+                        ));
+                        let mut sent = false;
+                        for recipient in &recipients {
+                            sent |= deliver_signed_packet_durable(
+                                &network, &store, conversation_id, recipient, &packet,
+                            ).await.is_ok();
+                        }
+                        if sent && store.update_direct_message(
+                            target, recipients[0].identity_id, true, Some(&message), false,
+                        )? {
+                            emit_json(&serde_json::json!({"event":"message_edited", "contact":contact, "message_id":message_id, "body":message}))?;
+                        } else {
+                            emit_json(&serde_json::json!({"event":"error", "message":"message not found or could not be queued"}))?;
+                        }
+                    }
+                    DaemonCommand::DeleteMessage { contact, message_id } => {
+                        let target = daemon_or_continue!(parse_message_id(&message_id));
+                        let recipients = daemon_or_continue!(contact_devices(&profile, &contact));
+                        let conversation_id = direct_conversation_id(profile.identity_id, recipients[0].identity_id);
+                        let packet = daemon_or_continue!(signed_direct_packet(
+                            &network, &key, &profile, DirectPayload::MessageDelete { target },
+                        ));
+                        let mut sent = false;
+                        for recipient in &recipients {
+                            sent |= deliver_signed_packet_durable(
+                                &network, &store, conversation_id, recipient, &packet,
+                            ).await.is_ok();
+                        }
+                        if sent && store.update_direct_message(
+                            target, recipients[0].identity_id, true, None, true,
+                        )? {
+                            emit_json(&serde_json::json!({"event":"message_deleted", "contact":contact, "message_id":message_id}))?;
+                        } else {
+                            emit_json(&serde_json::json!({"event":"error", "message":"message not found or could not be queued"}))?;
+                        }
+                    }
+                    DaemonCommand::DeleteMessageLocal { contact, message_id } => {
+                        let target = daemon_or_continue!(parse_message_id(&message_id));
+                        let recipients = daemon_or_continue!(contact_devices(&profile, &contact));
+                        if store.delete_direct_message_local(target, recipients[0].identity_id)? {
+                            emit_json(&serde_json::json!({"event":"message_deleted", "contact":contact, "message_id":message_id}))?;
+                        } else {
+                            emit_json(&serde_json::json!({"event":"error", "message":"message not found"}))?;
                         }
                     }
                     DaemonCommand::SendFile { contact, path: file_path } => {
@@ -960,6 +1367,11 @@ async fn daemon(path: &Path) -> Result<()> {
                                     body: format!("📎 {file_name}"),
                                     sent_at_unix: sent_at,
                                     outgoing: true,
+                                    reply_to: None,
+                                    edited: false,
+                                    deleted: false,
+                                    delivery: delivery.to_owned(),
+                                    file_path: Some(file_path.to_string_lossy().into_owned()),
                                 })?;
                                 emit_json(&serde_json::json!({"event":"file_sent", "to":recipients[0].name, "devices":recipients.len(), "file_name":file_name, "byte_len":byte_len, "sent_at":sent_at, "delivery":delivery}))?;
                             }
@@ -967,7 +1379,7 @@ async fn daemon(path: &Path) -> Result<()> {
                         }
                     }
                     DaemonCommand::CreateGroup { name, members } => {
-                        if name.trim().is_empty() || name.chars().count() > 128 || members.is_empty() {
+                        if name.trim().is_empty() || name.chars().count() > 128 || members.is_empty() || members.len() > 15 {
                             emit_json(&serde_json::json!({"event":"error", "message":"a group needs a name and at least one contact"}))?;
                             continue;
                         }
@@ -991,7 +1403,7 @@ async fn daemon(path: &Path) -> Result<()> {
                         let history_since_ms = identities.iter().map(|identity| (*identity, created_at_ms)).collect();
                         let mut member_devices = vec![key.device_id()];
                         member_devices.extend(recipients.iter().map(|contact| contact.device_id));
-                        let group = GroupProfile { id: group_id, name: name.trim().into(), owner: profile.identity_id, members: identities, member_devices, history_since_ms };
+                        let group = GroupProfile { id: group_id, name: name.trim().into(), owner: profile.identity_id, admins: vec![], members: identities, member_devices, history_since_ms };
                         store.create_conversation(group_id, profile.identity_id, &group.name, created_at_ms)?;
                         profile.groups.push(group.clone());
                         for recipient in &recipients {
@@ -1007,41 +1419,65 @@ async fn daemon(path: &Path) -> Result<()> {
                         let group_id = daemon_or_continue!(group_id
                             .parse::<ConversationId>().context("invalid group id"));
                         daemon_or_continue!(emit_group_history(&store, &profile, group_id));
+                        if let Some(group) = profile.groups.iter().find(|group| group.id == group_id) {
+                            emit_call_history(&store, &group.name)?;
+                        }
                     }
-                    DaemonCommand::GroupSend { group_id, message } => {
+                    DaemonCommand::GroupSend { group_id, message, reply_to } => {
                         let group_id = daemon_or_continue!(group_id
                             .parse::<ConversationId>().context("invalid group id"));
                         if message.is_empty() || message.len() > 64 * 1024 {
                             emit_json(&serde_json::json!({"event":"error", "message":"message must contain 1 byte to 64 KiB"}))?;
                             continue;
                         }
-                        let group = daemon_or_continue!(profile.groups.iter()
-                            .find(|group| group.id == group_id).cloned().context("group not found"));
-                        let events = store.load_events(group_id)?;
-                        let frontier = events.iter().fold(CausalFrontier::new(), |mut frontier, event| {
-                            frontier.entry(event.author_device).and_modify(|value| *value = (*value).max(event.device_sequence)).or_insert(event.device_sequence);
-                            frontier
-                        });
-                        let mut builder = ConversationBuilder::new(group_id, profile.identity_id, key.device_id(), frontier);
-                        let event = builder.build(EventBody::MessageCreate { content: MessageContent {
-                            text: message.clone(), reply_to: None, attachment_ids: vec![],
-                        }}, next_group_logical_time(&store, group_id)?, &mut OsRng)?;
-                        let ciphertext = mls.encrypt(group_id.as_bytes(), &event.to_wire()?)?;
-                        store.save_event(&event)?;
-                        let mut route = "direct";
-                        for recipient in group_remote_contacts(&profile, &group, key.device_id()) {
-                            let delivery = deliver_payload_durable(
-                                &network, &key, &profile, &store, group_id, &recipient,
-                                DirectPayload::GroupMessage { group_id, ciphertext: ciphertext.clone() },
-                            ).await?;
-                            match delivery {
-                                "queued" => route = "queued",
-                                "mailbox" if route == "direct" => route = "mailbox",
-                                _ => {}
-                            }
-                        }
+                        let reply_to = daemon_or_continue!(reply_to.as_deref()
+                            .map(|value| value.parse::<EventId>().context("invalid reply message id"))
+                            .transpose());
+                        let (event, route) = publish_group_event(
+                            &network, &key, &profile, &store, &mut mls, group_id,
+                            EventBody::MessageCreate { content: MessageContent {
+                                text: message.clone(), reply_to, attachment_ids: vec![],
+                            }}
+                        ).await?;
                         persist_mls(&store, mls_snapshot_id, &mls)?;
-                        emit_json(&serde_json::json!({"event":"group_message", "group_id":group_id.to_string(), "author":profile.name, "body":message, "outgoing":true, "delivery":route}))?;
+                        emit_json(&serde_json::json!({"event":"group_message", "group_id":group_id.to_string(), "message_id":event.event_id.to_string(), "author":profile.name, "body":message, "reply_to":reply_to.map(|id| id.to_string()), "outgoing":true, "delivery":route}))?;
+                    }
+                    DaemonCommand::GroupEditMessage { group_id, message_id, message } => {
+                        let group_id = daemon_or_continue!(group_id.parse::<ConversationId>().context("invalid group id"));
+                        let target = daemon_or_continue!(message_id.parse::<EventId>().context("invalid message id"));
+                        if message.is_empty() || message.len() > 64 * 1024 {
+                            emit_json(&serde_json::json!({"event":"error", "message":"message must contain 1 byte to 64 KiB"}))?;
+                            continue;
+                        }
+                        let original = daemon_or_continue!(store.load_events(group_id)?.into_iter()
+                            .find(|event| event.event_id == target && event.author_identity == profile.identity_id)
+                            .and_then(|event| match event.body { EventBody::MessageCreate { content } => Some(content), _ => None })
+                            .context("only the author can edit this message"));
+                        let (event, _) = publish_group_event(
+                            &network, &key, &profile, &store, &mut mls, group_id,
+                            EventBody::MessageEdit { target, content: MessageContent {
+                                text: message.clone(), reply_to: original.reply_to,
+                                attachment_ids: original.attachment_ids,
+                            }}
+                        ).await?;
+                        persist_mls(&store, mls_snapshot_id, &mls)?;
+                        emit_json(&serde_json::json!({"event":"group_message_edited", "group_id":group_id.to_string(), "message_id":target.to_string(), "event_id":event.event_id.to_string(), "body":message}))?;
+                    }
+                    DaemonCommand::GroupDeleteMessage { group_id, message_id } => {
+                        let group_id = daemon_or_continue!(group_id.parse::<ConversationId>().context("invalid group id"));
+                        let target = daemon_or_continue!(message_id.parse::<EventId>().context("invalid message id"));
+                        let owned = store.load_events(group_id)?.into_iter().any(|event| {
+                            event.event_id == target && event.author_identity == profile.identity_id
+                                && matches!(event.body, EventBody::MessageCreate { .. })
+                        });
+                        if !owned {
+                            emit_json(&serde_json::json!({"event":"error", "message":"only the author can delete this message"}))?;
+                            continue;
+                        }
+                        publish_group_event(&network, &key, &profile, &store, &mut mls, group_id,
+                            EventBody::MessageDelete { target }).await?;
+                        persist_mls(&store, mls_snapshot_id, &mls)?;
+                        emit_json(&serde_json::json!({"event":"group_message_deleted", "group_id":group_id.to_string(), "message_id":target.to_string()}))?;
                     }
                     DaemonCommand::GroupSendFile { group_id, path: file_path } => {
                         let group_id = daemon_or_continue!(group_id
@@ -1071,8 +1507,14 @@ async fn daemon(path: &Path) -> Result<()> {
                             .parse::<ConversationId>().context("invalid group id"));
                         let group_index = daemon_or_continue!(profile.groups.iter()
                             .position(|group| group.id == group_id).context("group not found"));
-                        if profile.groups[group_index].owner != profile.identity_id {
-                            emit_json(&serde_json::json!({"event":"error", "message":"only the group creator can add members"}))?;
+                        let can_manage = profile.groups[group_index].owner == profile.identity_id
+                            || profile.groups[group_index].admins.contains(&profile.identity_id);
+                        if !can_manage {
+                            emit_json(&serde_json::json!({"event":"error", "message":"only group administrators can add members"}))?;
+                            continue;
+                        }
+                        if profile.groups[group_index].members.len() >= 16 {
+                            emit_json(&serde_json::json!({"event":"error", "message":"groups support at most 16 members"}))?;
                             continue;
                         }
                         let added = daemon_or_continue!(profile.contacts.iter()
@@ -1107,14 +1549,22 @@ async fn daemon(path: &Path) -> Result<()> {
                             .parse::<ConversationId>().context("invalid group id"));
                         let group_index = daemon_or_continue!(profile.groups.iter()
                             .position(|group| group.id == group_id).context("group not found"));
-                        if profile.groups[group_index].owner != profile.identity_id {
-                            emit_json(&serde_json::json!({"event":"error", "message":"only the group creator can remove members"}))?;
+                        let is_owner = profile.groups[group_index].owner == profile.identity_id;
+                        let can_manage = is_owner || profile.groups[group_index].admins.contains(&profile.identity_id);
+                        if !can_manage {
+                            emit_json(&serde_json::json!({"event":"error", "message":"only group administrators can remove members"}))?;
                             continue;
                         }
                         let removed = daemon_or_continue!(profile.contacts.iter()
                             .find(|item| item.name.eq_ignore_ascii_case(&contact)).cloned().context("contact not found"));
                         if !profile.groups[group_index].members.contains(&removed.identity_id) {
                             emit_json(&serde_json::json!({"event":"error", "message":"contact is not a member"}))?;
+                            continue;
+                        }
+                        if removed.identity_id == profile.groups[group_index].owner
+                            || (!is_owner && profile.groups[group_index].admins.contains(&removed.identity_id))
+                        {
+                            emit_json(&serde_json::json!({"event":"error", "message":"an administrator cannot remove the owner or another administrator"}))?;
                             continue;
                         }
                         let old_group = profile.groups[group_index].clone();
@@ -1140,30 +1590,184 @@ async fn daemon(path: &Path) -> Result<()> {
                         save_profile(path, &profile)?;
                         emit_groups(&profile)?;
                     }
+                    DaemonCommand::GroupSetAdmin { group_id, contact, admin } => {
+                        let group_id = daemon_or_continue!(group_id.parse::<ConversationId>().context("invalid group id"));
+                        let index = daemon_or_continue!(profile.groups.iter().position(|group| group.id == group_id).context("group not found"));
+                        if profile.groups[index].owner != profile.identity_id {
+                            emit_json(&serde_json::json!({"event":"error", "message":"only the owner can manage administrators"}))?;
+                            continue;
+                        }
+                        let identity = daemon_or_continue!(profile.contacts.iter()
+                            .find(|item| item.name.eq_ignore_ascii_case(&contact))
+                            .map(|item| item.identity_id).context("contact not found"));
+                        if !profile.groups[index].members.contains(&identity) || identity == profile.groups[index].owner {
+                            emit_json(&serde_json::json!({"event":"error", "message":"administrator must be a regular group member"}))?;
+                            continue;
+                        }
+                        if admin && !profile.groups[index].admins.contains(&identity) {
+                            profile.groups[index].admins.push(identity);
+                        } else if !admin {
+                            profile.groups[index].admins.retain(|candidate| *candidate != identity);
+                        }
+                        let updated = profile.groups[index].clone();
+                        for recipient in group_remote_contacts(&profile, &updated, key.device_id()) {
+                            deliver_payload_durable(&network, &key, &profile, &store, group_id, &recipient,
+                                DirectPayload::GroupProfileUpdate { group: updated.clone() }).await?;
+                        }
+                        save_profile(path, &profile)?;
+                        emit_groups(&profile)?;
+                    }
+                    DaemonCommand::GroupTransferOwnership { group_id, contact } => {
+                        let group_id = daemon_or_continue!(group_id.parse::<ConversationId>().context("invalid group id"));
+                        let index = daemon_or_continue!(profile.groups.iter().position(|group| group.id == group_id).context("group not found"));
+                        if profile.groups[index].owner != profile.identity_id {
+                            emit_json(&serde_json::json!({"event":"error", "message":"only the owner can transfer ownership"}))?;
+                            continue;
+                        }
+                        let identity = daemon_or_continue!(profile.contacts.iter()
+                            .find(|item| item.name.eq_ignore_ascii_case(&contact))
+                            .map(|item| item.identity_id).context("contact not found"));
+                        if !profile.groups[index].members.contains(&identity) {
+                            emit_json(&serde_json::json!({"event":"error", "message":"new owner must be a group member"}))?;
+                            continue;
+                        }
+                        profile.groups[index].admins.retain(|candidate| *candidate != identity);
+                        profile.groups[index].owner = identity;
+                        let updated = profile.groups[index].clone();
+                        for recipient in group_remote_contacts(&profile, &updated, key.device_id()) {
+                            deliver_payload_durable(&network, &key, &profile, &store, group_id, &recipient,
+                                DirectPayload::GroupProfileUpdate { group: updated.clone() }).await?;
+                        }
+                        save_profile(path, &profile)?;
+                        emit_groups(&profile)?;
+                    }
+                    DaemonCommand::GroupDissolve { group_id } => {
+                        let group_id = daemon_or_continue!(group_id.parse::<ConversationId>().context("invalid group id"));
+                        let index = daemon_or_continue!(profile.groups.iter().position(|group| group.id == group_id).context("group not found"));
+                        if profile.groups[index].owner != profile.identity_id {
+                            emit_json(&serde_json::json!({"event":"error", "message":"only the owner can dissolve the group"}))?;
+                            continue;
+                        }
+                        let group = profile.groups[index].clone();
+                        for recipient in group_remote_contacts(&profile, &group, key.device_id()) {
+                            deliver_payload_durable(&network, &key, &profile, &store, group_id, &recipient,
+                                DirectPayload::GroupDissolve { group_id }).await?;
+                        }
+                        profile.groups.remove(index);
+                        save_profile(path, &profile)?;
+                        emit_groups(&profile)?;
+                    }
                     DaemonCommand::StartCall { contact, ring } => {
+                        if active_call.is_some() {
+                            emit_json(&serde_json::json!({"event":"error", "message":"hold the current call before starting another"}))?;
+                            continue;
+                        }
                         let recipients = daemon_or_continue!(resolve_call_recipients(&profile, &contact));
                         let call_id = CallId::random(&mut OsRng);
+                        let started_at_unix = OffsetDateTime::now_utc().unix_timestamp();
+                        let selected = recipients
+                            .iter()
+                            .map(|recipient| recipient.identity_id)
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
                         let signal = CallSignal::Invite {
                             call_id,
-                            selected: recipients.iter().map(|recipient| recipient.identity_id).collect(),
+                            selected,
                             ring,
                         };
                         for recipient in &recipients {
                             daemon_or_continue!(network.send_call_signal(&recipient.address, &signal).await);
                         }
-                        active_call = Some(ActiveCall { id: call_id, label: contact.clone(), recipients });
+                        store.save_call_event(&CallEventRecord {
+                            call_id: *call_id.as_bytes(), conversation_key: contact.clone(),
+                            direction: "outgoing".into(), outcome: if ring { "ringing".into() } else { "joined".into() },
+                            started_at_unix, duration_ms: 0,
+                        })?;
+                        active_call = Some(ActiveCall {
+                            id: call_id, label: contact.clone(), recipients, started_at_unix,
+                            connected_at: (!ring).then(std::time::Instant::now),
+                        });
                         emit_json(&serde_json::json!({"event":"call_started", "call_id":call_id.to_string(), "contact":contact, "ring":ring}))?;
                     }
                     DaemonCommand::JoinCall { contact, call_id } => {
                         let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
                         let recipients = daemon_or_continue!(resolve_call_recipients(&profile, &contact));
+                        if active_call.as_ref().is_some_and(|call| call.id != call_id) {
+                            if held_call.is_some() {
+                                emit_json(&serde_json::json!({"event":"error", "message":"only one held call is supported"}))?;
+                                continue;
+                            }
+                            let previous = active_call.take().expect("checked active call");
+                            for recipient in &previous.recipients {
+                                network.send_call_signal(&recipient.address, &CallSignal::Hold { call_id: previous.id }).await.ok();
+                            }
+                            for (_, task) in media_tasks.drain(..) { task.abort(); }
+                            for kind in [MediaKind::Voice, MediaKind::Camera, MediaKind::Screen, MediaKind::SystemAudio] {
+                                media.unpublish(kind).await.ok();
+                                media.stop_receiving(kind).await.ok();
+                            }
+                            emit_json(&serde_json::json!({"event":"call_held", "call_id":previous.id.to_string(), "contact":previous.label}))?;
+                            held_call = Some(previous);
+                        }
                         for recipient in &recipients {
                             daemon_or_continue!(network.send_call_signal(&recipient.address, &CallSignal::Join { call_id }).await);
                         }
-                        active_call = Some(ActiveCall { id: call_id, label: contact.clone(), recipients });
+                        let started_at_unix = OffsetDateTime::now_utc().unix_timestamp();
+                        store.save_call_event(&CallEventRecord {
+                            call_id: *call_id.as_bytes(), conversation_key: contact.clone(),
+                            direction: "incoming".into(), outcome: "answered".into(),
+                            started_at_unix, duration_ms: 0,
+                        })?;
+                        active_call = Some(ActiveCall {
+                            id: call_id, label: contact.clone(), recipients, started_at_unix,
+                            connected_at: Some(std::time::Instant::now()),
+                        });
                         emit_json(&serde_json::json!({"event":"call_joined", "call_id":call_id.to_string(), "contact":contact}))?;
                     }
-                    DaemonCommand::LeaveCall { contact, call_id } => {
+                    DaemonCommand::RejectCall { contact, call_id, missed } => {
+                        let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
+                        let recipients = daemon_or_continue!(resolve_call_recipients(&profile, &contact));
+                        for recipient in &recipients {
+                            network.send_call_signal(&recipient.address, &CallSignal::Reject { call_id, missed }).await.ok();
+                        }
+                        store.save_call_event(&CallEventRecord {
+                            call_id: *call_id.as_bytes(), conversation_key: contact.clone(),
+                            direction: "incoming".into(), outcome: if missed { "missed".into() } else { "rejected".into() },
+                            started_at_unix: OffsetDateTime::now_utc().unix_timestamp(), duration_ms: 0,
+                        })?;
+                        emit_json(&serde_json::json!({"event":"call_rejected", "call_id":call_id.to_string(), "contact":contact, "outcome":if missed { "missed" } else { "rejected" }}))?;
+                    }
+                    DaemonCommand::HoldCall { call_id } => {
+                        let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
+                        if active_call.as_ref().is_none_or(|call| call.id != call_id) {
+                            emit_json(&serde_json::json!({"event":"error", "message":"active call not found"}))?;
+                            continue;
+                        }
+                        let call = active_call.take().expect("active call was checked");
+                        for recipient in &call.recipients {
+                            network.send_call_signal(&recipient.address, &CallSignal::Hold { call_id }).await.ok();
+                        }
+                        held_call = Some(call);
+                        emit_json(&serde_json::json!({"event":"call_held", "call_id":call_id.to_string()}))?;
+                    }
+                    DaemonCommand::ResumeCall { call_id } => {
+                        let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
+                        if active_call.is_some() {
+                            emit_json(&serde_json::json!({"event":"error", "message":"another call is active"}))?;
+                            continue;
+                        }
+                        let Some(call) = held_call.take().filter(|call| call.id == call_id) else {
+                            emit_json(&serde_json::json!({"event":"error", "message":"held call not found"}))?;
+                            continue;
+                        };
+                        for recipient in &call.recipients {
+                            network.send_call_signal(&recipient.address, &CallSignal::Resume { call_id }).await.ok();
+                        }
+                        active_call = Some(call);
+                        emit_json(&serde_json::json!({"event":"call_resumed", "call_id":call_id.to_string()}))?;
+                    }
+                    DaemonCommand::LeaveCall { contact, call_id, missed } => {
                         let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
                         let recipients = if let Some(call) = active_call.as_ref().filter(|call| call.id == call_id) {
                             call.recipients.clone()
@@ -1180,8 +1784,25 @@ async fn daemon(path: &Path) -> Result<()> {
                             media.unpublish(kind).await.ok();
                             media.stop_receiving(kind).await.ok();
                         }
-                        active_call = None;
-                        emit_json(&serde_json::json!({"event":"call_left", "call_id":call_id.to_string(), "contact":contact}))?;
+                        if active_call.as_ref().is_some_and(|call| call.id == call_id) {
+                            let ended = active_call.take().expect("active call was checked");
+                            store.save_call_event(&CallEventRecord {
+                                call_id: *call_id.as_bytes(), conversation_key: ended.label,
+                                direction: "local".into(), outcome: if missed { "missed".into() } else { "ended".into() },
+                                started_at_unix: ended.started_at_unix,
+                                duration_ms: ended.connected_at.map_or(0, |started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                            })?;
+                        } else if held_call.as_ref().is_some_and(|call| call.id == call_id) {
+                            held_call = None;
+                        }
+                        emit_json(&serde_json::json!({"event":"call_left", "call_id":call_id.to_string(), "contact":contact, "outcome":if missed { "missed" } else { "ended" }}))?;
+                        if active_call.is_none() && let Some(call) = held_call.take() {
+                            for recipient in &call.recipients {
+                                network.send_call_signal(&recipient.address, &CallSignal::Resume { call_id: call.id }).await.ok();
+                            }
+                            emit_json(&serde_json::json!({"event":"call_resumed", "call_id":call.id.to_string(), "contact":call.label}))?;
+                            active_call = Some(call);
+                        }
                     }
                     DaemonCommand::SetMedia { contact, call_id, kind, enabled, profile: requested } => {
                         let call_id = daemon_or_continue!(call_id.parse::<CallId>().context("invalid call id"));
@@ -1259,11 +1880,13 @@ async fn daemon(path: &Path) -> Result<()> {
                         if was_pending {
                             upsert_contact(&mut profile, Contact {
                                 name: packet.sender_name.clone(), identity_id: packet.sender_identity,
+                                avatar: None,
                                 device_id: packet.sender_device, public_key: packet.sender_public_key,
                                 address: packet.return_address.clone(), mailbox_urls: packet.mailbox_urls.clone(),
                                 shared_secret, verified: true,
                                 mls_key_package: packet.mls_key_package.clone(),
                                 identity_events: packet.identity_events.clone(),
+                                blocked: false, removed: false, hide_presence: false,
                             });
                             profile.pending_invites.retain(|pending| pending.shared_secret != shared_secret);
                             save_profile(path, &profile)?;
@@ -1287,19 +1910,31 @@ async fn daemon(path: &Path) -> Result<()> {
                                 emit_groups(&profile)?;
                             }
                         }
+                        if matches!(packet.payload, DirectPayload::DeviceHello)
+                            && packet.sender_identity == profile.identity_id
+                            && let Some(recipient) = profile.contacts.iter()
+                                .find(|contact| contact.device_id == packet.sender_device)
+                                .cloned()
+                        {
+                            send_device_history(&network, &key, &profile, &store, &recipient).await?;
+                        }
+                        if sender_is_blocked(&profile, &packet) && !is_group_payload(&packet.payload) {
+                            continue;
+                        }
                         if handle_group_payload(
                             &network, &key, &store, path, &mut profile, &mut mls, &packet,
                             &mut incoming_files, "direct",
                         ).await? {
                             persist_mls(&store, mls_snapshot_id, &mls)?;
                         } else {
-                            handle_incoming_payload(&store, path, &packet, shared_secret, &mut incoming_files, "direct")?;
+                            handle_incoming_payload(&store, path, profile.identity_id, &packet, shared_secret, &mut incoming_files, "direct")?;
+                            acknowledge_incoming_message(&network, &key, &profile, &store, &packet).await?;
                         }
                     }
                     Err(error) => emit_json(&serde_json::json!({"event":"rejected", "message":error.to_string()}))?,
                 }
             }
-            _ = mailbox_tick.tick() => {
+            _ = mailbox_tick.tick(), if profile.mailbox_url.is_some() => {
                 match drain_mailbox(&profile).await {
                     Ok(messages) => for bytes in messages {
                         match decrypt_incoming(&profile, &bytes) {
@@ -1307,11 +1942,13 @@ async fn daemon(path: &Path) -> Result<()> {
                                 if was_pending {
                                     upsert_contact(&mut profile, Contact {
                                         name: packet.sender_name.clone(), identity_id: packet.sender_identity,
+                                        avatar: None,
                                         device_id: packet.sender_device, public_key: packet.sender_public_key,
                                         address: packet.return_address.clone(), mailbox_urls: packet.mailbox_urls.clone(),
                                         shared_secret, verified: true,
                                         mls_key_package: packet.mls_key_package.clone(),
                                         identity_events: packet.identity_events.clone(),
+                                        blocked: false, removed: false, hide_presence: false,
                                     });
                                     profile.pending_invites.retain(|pending| pending.shared_secret != shared_secret);
                                     save_profile(path, &profile)?;
@@ -1335,13 +1972,17 @@ async fn daemon(path: &Path) -> Result<()> {
                                         emit_groups(&profile)?;
                                     }
                                 }
+                                if sender_is_blocked(&profile, &packet) && !is_group_payload(&packet.payload) {
+                                    continue;
+                                }
                                 if handle_group_payload(
                                     &network, &key, &store, path, &mut profile, &mut mls, &packet,
                                     &mut incoming_files, "mailbox",
                                 ).await? {
                                     persist_mls(&store, mls_snapshot_id, &mls)?;
                                 } else {
-                                    handle_incoming_payload(&store, path, &packet, shared_secret, &mut incoming_files, "mailbox")?;
+                                    handle_incoming_payload(&store, path, profile.identity_id, &packet, shared_secret, &mut incoming_files, "mailbox")?;
+                                    acknowledge_incoming_message(&network, &key, &profile, &store, &packet).await?;
                                 }
                             }
                             Err(error) => emit_json(&serde_json::json!({"event":"rejected", "message":error.to_string()}))?,
@@ -1365,6 +2006,9 @@ async fn daemon(path: &Path) -> Result<()> {
                     .find(|contact| contact.address.endpoint_id == remote_endpoint);
                 match signal {
                     CallSignal::Invite { call_id, selected, ring } => {
+                        if remote_contact.is_some_and(|contact| contact.blocked || contact.removed) {
+                            continue;
+                        }
                         let group_name = remote_contact.and_then(|sender| profile.groups.iter().find(|group| {
                             group.members.contains(&profile.identity_id)
                                 && group.members.contains(&sender.identity_id)
@@ -1372,12 +2016,46 @@ async fn daemon(path: &Path) -> Result<()> {
                                 && group.members.len() > 2
                         })).map(|group| group.name.clone());
                         let target = group_name.or_else(|| remote_contact.map(|contact| contact.name.clone()));
+                        if let Some(target) = &target {
+                            store.save_call_event(&CallEventRecord {
+                                call_id: *call_id.as_bytes(), conversation_key: target.clone(),
+                                direction: "incoming".into(), outcome: if ring { "ringing".into() } else { "room".into() },
+                                started_at_unix: OffsetDateTime::now_utc().unix_timestamp(), duration_ms: 0,
+                            })?;
+                        }
                         emit_json(&serde_json::json!({
                             "event":"call_invite", "call_id":call_id.to_string(), "selected":selected,
                             "ring":ring, "remote_endpoint":remote_endpoint, "contact":target
                         }))?;
                     }
-                    CallSignal::Join { call_id } => emit_json(&serde_json::json!({"event":"call_join", "call_id":call_id.to_string(), "remote_endpoint":remote_endpoint}))?,
+                    CallSignal::Join { call_id } => {
+                        if let Some(call) = active_call.as_mut().filter(|call| call.id == call_id) {
+                            call.connected_at.get_or_insert_with(std::time::Instant::now);
+                            store.save_call_event(&CallEventRecord {
+                                call_id: *call_id.as_bytes(), conversation_key: call.label.clone(),
+                                direction: "outgoing".into(), outcome: "answered".into(),
+                                started_at_unix: call.started_at_unix, duration_ms: 0,
+                            })?;
+                        }
+                        emit_json(&serde_json::json!({"event":"call_connected", "call_id":call_id.to_string(), "remote_endpoint":remote_endpoint}))?;
+                    }
+                    CallSignal::Reject { call_id, missed } => {
+                        if active_call.as_ref().is_some_and(|call| call.id == call_id) {
+                            let call = active_call.take().expect("active call was checked");
+                            store.save_call_event(&CallEventRecord {
+                                call_id: *call_id.as_bytes(), conversation_key: call.label,
+                                direction: "outgoing".into(), outcome: if missed { "missed".into() } else { "rejected".into() },
+                                started_at_unix: call.started_at_unix, duration_ms: 0,
+                            })?;
+                        }
+                        emit_json(&serde_json::json!({"event":"call_rejected", "call_id":call_id.to_string(), "outcome":if missed { "missed" } else { "rejected" }}))?;
+                    }
+                    CallSignal::Hold { call_id } => {
+                        emit_json(&serde_json::json!({"event":"call_remote_held", "call_id":call_id.to_string()}))?;
+                    }
+                    CallSignal::Resume { call_id } => {
+                        emit_json(&serde_json::json!({"event":"call_remote_resumed", "call_id":call_id.to_string()}))?;
+                    }
                     CallSignal::Leave { call_id } => {
                         let mut ended = false;
                         if let Some(call) = active_call.as_mut().filter(|call| call.id == call_id) {
@@ -1409,7 +2087,9 @@ async fn daemon(path: &Path) -> Result<()> {
                 let incoming = incoming?;
                 let packet = MediaDatagram::from_wire(&incoming.bytes)?;
                 let known_sender = profile.contacts.iter().any(|contact| {
-                    contact.address.endpoint_id == incoming.remote_endpoint_id
+                    !contact.blocked
+                        && !contact.removed
+                        && contact.address.endpoint_id == incoming.remote_endpoint_id
                         && contact.device_id == packet.sender
                 });
                 if packet.version != PROTOCOL_VERSION || !known_sender {
@@ -1431,6 +2111,68 @@ async fn daemon(path: &Path) -> Result<()> {
     }
     network.shutdown().await?;
     Ok(())
+}
+
+async fn check_for_update() -> Result<serde_json::Value> {
+    let release: serde_json::Value = reqwest::Client::new()
+        .get("https://api.github.com/repos/Arzuparreta/pptalk/releases/latest")
+        .header(reqwest::header::USER_AGENT, "pptalk-update-check")
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let latest = release
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let current = env!("CARGO_PKG_VERSION");
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let wanted_suffix = if cfg!(target_os = "windows") {
+        format!("windows-{architecture}.exe")
+    } else {
+        format!("linux-{architecture}.AppImage")
+    };
+    let url = release
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|assets| {
+            assets.iter().find(|asset| {
+                asset
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| name.ends_with(&wanted_suffix))
+            })
+        })
+        .and_then(|asset| asset.get("browser_download_url"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let available = release_version(latest)
+        .is_some_and(|latest| release_version(current).is_some_and(|current| latest > current))
+        && !url.is_empty();
+    Ok(serde_json::json!({
+        "event":"update", "available":available, "current":current,
+        "version":latest, "url":url
+    }))
+}
+
+fn release_version(value: &str) -> Option<(u64, u64, u64)> {
+    let stable = value
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    let mut components = stable.split('.');
+    let version = (
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+    );
+    components.next().is_none().then_some(version)
 }
 
 fn default_media_profile(kind: MediaKind) -> QualityProfile {
@@ -1464,18 +2206,46 @@ fn default_media_profile(kind: MediaKind) -> QualityProfile {
 
 fn direct_message_body(payload: &DirectPayload) -> Option<&str> {
     match payload {
-        DirectPayload::Message { body } => Some(body),
+        DirectPayload::Message { body, .. } => Some(body),
         DirectPayload::DeviceHello
+        | DirectPayload::DeviceHistory { .. }
+        | DirectPayload::MessageEdit { .. }
+        | DirectPayload::MessageDelete { .. }
+        | DirectPayload::DeliveryReceipt { .. }
         | DirectPayload::FileOffer { .. }
         | DirectPayload::FileChunk { .. }
         | DirectPayload::GroupWelcome { .. }
         | DirectPayload::GroupMessage { .. }
         | DirectPayload::GroupCommit { .. }
+        | DirectPayload::GroupProfileUpdate { .. }
+        | DirectPayload::GroupDissolve { .. }
         | DirectPayload::GroupFileOffer { .. }
         | DirectPayload::GroupFileChunk { .. }
         | DirectPayload::GroupSyncRequest { .. }
         | DirectPayload::GroupSyncEvent { .. } => None,
     }
+}
+
+fn sender_is_blocked(profile: &Profile, packet: &ChatPacket) -> bool {
+    profile
+        .contacts
+        .iter()
+        .any(|contact| contact.identity_id == packet.sender_identity && contact.blocked)
+}
+
+fn is_group_payload(payload: &DirectPayload) -> bool {
+    matches!(
+        payload,
+        DirectPayload::GroupWelcome { .. }
+            | DirectPayload::GroupMessage { .. }
+            | DirectPayload::GroupCommit { .. }
+            | DirectPayload::GroupProfileUpdate { .. }
+            | DirectPayload::GroupDissolve { .. }
+            | DirectPayload::GroupFileOffer { .. }
+            | DirectPayload::GroupFileChunk { .. }
+            | DirectPayload::GroupSyncRequest { .. }
+            | DirectPayload::GroupSyncEvent { .. }
+    )
 }
 
 fn signed_direct_packet(
@@ -1487,6 +2257,7 @@ fn signed_direct_packet(
     let mut packet = ChatPacket {
         version: PROTOCOL_VERSION,
         sender_name: profile.name.clone(),
+        sender_avatar: profile.avatar.clone(),
         sender_identity: profile.identity_id,
         sender_device: key.device_id(),
         sender_public_key: key.public_key(),
@@ -1690,6 +2461,9 @@ async fn handle_group_payload(
             group_id,
             ciphertext,
         } => {
+            if sender_is_blocked(profile, packet) {
+                return Ok(true);
+            }
             let group = profile
                 .groups
                 .iter()
@@ -1704,12 +2478,37 @@ async fn handle_group_payload(
             {
                 bail!("group event author mismatch");
             }
+            if let EventBody::MessageEdit { target, .. } | EventBody::MessageDelete { target } =
+                &event.body
+            {
+                let valid_target = store.load_events(*group_id)?.into_iter().any(|candidate| {
+                    candidate.event_id == *target
+                        && candidate.author_identity == packet.sender_identity
+                        && matches!(candidate.body, EventBody::MessageCreate { .. })
+                });
+                if !valid_target {
+                    bail!("group message mutation is not authored by the original sender");
+                }
+            }
             let inserted = store.save_event(&event)?;
-            if inserted && let EventBody::MessageCreate { content } = event.body {
-                emit_json(&serde_json::json!({
-                    "event":"group_message", "group_id":group_id.to_string(),
-                    "author":packet.sender_name, "body":content.text, "outgoing":false
-                }))?;
+            if inserted {
+                match event.body {
+                    EventBody::MessageCreate { content } => emit_json(&serde_json::json!({
+                        "event":"group_message", "group_id":group_id.to_string(),
+                        "message_id":event.event_id.to_string(), "author":packet.sender_name,
+                        "body":content.text, "reply_to":content.reply_to.map(|id| id.to_string()),
+                        "outgoing":false
+                    }))?,
+                    EventBody::MessageEdit { target, content } => emit_json(&serde_json::json!({
+                        "event":"group_message_edited", "group_id":group_id.to_string(),
+                        "message_id":target.to_string(), "body":content.text
+                    }))?,
+                    EventBody::MessageDelete { target } => emit_json(&serde_json::json!({
+                        "event":"group_message_deleted", "group_id":group_id.to_string(),
+                        "message_id":target.to_string()
+                    }))?,
+                    _ => {}
+                }
             }
             Ok(true)
         }
@@ -1717,10 +2516,11 @@ async fn handle_group_payload(
             let Some(index) = profile.groups.iter().position(|known| known.id == group.id) else {
                 bail!("commit for unknown group");
             };
-            if profile.groups[index].owner != packet.sender_identity
-                || group.owner != packet.sender_identity
-            {
-                bail!("only the group creator can commit membership changes");
+            let previous = &profile.groups[index];
+            let authorized = previous.owner == packet.sender_identity
+                || previous.admins.contains(&packet.sender_identity);
+            if !authorized || group.owner != previous.owner {
+                bail!("only group administrators can commit membership changes");
             }
             match mls.decrypt(group.id.as_bytes(), commit) {
                 Err(MlsError::ControlMessage) => {}
@@ -1736,6 +2536,43 @@ async fn handle_group_payload(
             emit_groups(profile)?;
             Ok(true)
         }
+        DirectPayload::GroupProfileUpdate { group } => {
+            let Some(index) = profile.groups.iter().position(|known| known.id == group.id) else {
+                bail!("profile update for unknown group");
+            };
+            let previous = &profile.groups[index];
+            if previous.owner != packet.sender_identity
+                || previous.members != group.members
+                || previous.member_devices != group.member_devices
+                || !group.members.contains(&group.owner)
+                || group
+                    .admins
+                    .iter()
+                    .any(|admin| !group.members.contains(admin) || *admin == group.owner)
+            {
+                bail!("invalid group profile update");
+            }
+            profile.groups[index] = group.clone();
+            save_profile(profile_path, profile)?;
+            emit_groups(profile)?;
+            Ok(true)
+        }
+        DirectPayload::GroupDissolve { group_id } => {
+            let Some(index) = profile
+                .groups
+                .iter()
+                .position(|known| known.id == *group_id)
+            else {
+                return Ok(true);
+            };
+            if profile.groups[index].owner != packet.sender_identity {
+                bail!("only the group owner can dissolve the group");
+            }
+            profile.groups.remove(index);
+            save_profile(profile_path, profile)?;
+            emit_groups(profile)?;
+            Ok(true)
+        }
         DirectPayload::GroupFileOffer {
             group_id,
             transfer_id,
@@ -1743,6 +2580,9 @@ async fn handle_group_payload(
             manifest,
             event,
         } => {
+            if sender_is_blocked(profile, packet) {
+                return Ok(true);
+            }
             validate_group_file_sender(profile, packet, *group_id)?;
             if manifest.ciphertext_hash != *transfer_id || manifest.chunk_hashes.len() > 65_536 {
                 bail!("invalid group attachment manifest");
@@ -1777,6 +2617,9 @@ async fn handle_group_payload(
             index,
             ciphertext,
         } => {
+            if sender_is_blocked(profile, packet) {
+                return Ok(true);
+            }
             validate_group_file_sender(profile, packet, *group_id)?;
             if ciphertext.len() > 4 * 1024 * 1024 {
                 bail!("group attachment chunk exceeds protocol limit");
@@ -1794,6 +2637,9 @@ async fn handle_group_payload(
             Ok(true)
         }
         DirectPayload::GroupSyncRequest { group_id, frontier } => {
+            if sender_is_blocked(profile, packet) {
+                return Ok(true);
+            }
             let group = profile
                 .groups
                 .iter()
@@ -1846,6 +2692,9 @@ async fn handle_group_payload(
             group_id,
             ciphertext,
         } => {
+            if sender_is_blocked(profile, packet) {
+                return Ok(true);
+            }
             let group = profile
                 .groups
                 .iter()
@@ -1867,26 +2716,51 @@ async fn handle_group_payload(
             {
                 bail!("group sync event is outside the authorized history window");
             }
-            if store.save_event(&event)?
-                && let EventBody::MessageCreate { content } = event.body
+            if let EventBody::MessageEdit { target, .. } | EventBody::MessageDelete { target } =
+                &event.body
             {
-                let outgoing = event.author_identity == profile.identity_id;
-                let author = if outgoing {
-                    profile.name.clone()
-                } else {
-                    profile
-                        .contacts
-                        .iter()
-                        .find(|contact| contact.identity_id == event.author_identity)
-                        .map_or_else(
-                            || event.author_identity.short(),
-                            |contact| contact.name.clone(),
-                        )
-                };
-                emit_json(&serde_json::json!({
-                    "event":"group_message", "group_id":group_id.to_string(),
-                    "author":author, "body":content.text, "outgoing":outgoing, "synced":true
-                }))?;
+                let valid_target = store.load_events(*group_id)?.into_iter().any(|candidate| {
+                    candidate.event_id == *target
+                        && candidate.author_identity == packet.sender_identity
+                        && matches!(candidate.body, EventBody::MessageCreate { .. })
+                });
+                if !valid_target {
+                    bail!("synced group mutation is not authored by the original sender");
+                }
+            }
+            if store.save_event(&event)? {
+                match event.body {
+                    EventBody::MessageCreate { content } => {
+                        let outgoing = event.author_identity == profile.identity_id;
+                        let author = if outgoing {
+                            profile.name.clone()
+                        } else {
+                            profile
+                                .contacts
+                                .iter()
+                                .find(|contact| contact.identity_id == event.author_identity)
+                                .map_or_else(
+                                    || event.author_identity.short(),
+                                    |contact| contact.name.clone(),
+                                )
+                        };
+                        emit_json(&serde_json::json!({
+                            "event":"group_message", "group_id":group_id.to_string(),
+                            "message_id":event.event_id.to_string(), "author":author,
+                            "body":content.text, "reply_to":content.reply_to.map(|id| id.to_string()),
+                            "outgoing":outgoing, "synced":true
+                        }))?;
+                    }
+                    EventBody::MessageEdit { target, content } => emit_json(&serde_json::json!({
+                        "event":"group_message_edited", "group_id":group_id.to_string(),
+                        "message_id":target.to_string(), "body":content.text, "synced":true
+                    }))?,
+                    EventBody::MessageDelete { target } => emit_json(&serde_json::json!({
+                        "event":"group_message_deleted", "group_id":group_id.to_string(),
+                        "message_id":target.to_string(), "synced":true
+                    }))?,
+                    _ => {}
+                }
             }
             Ok(true)
         }
@@ -1916,6 +2790,60 @@ fn next_group_logical_time(store: &Store, group_id: ConversationId) -> Result<i6
         .map_or_else(now_millis, |latest| {
             now_millis().max(latest.saturating_add(1))
         }))
+}
+
+async fn publish_group_event(
+    network: &PeerNetwork,
+    key: &DeviceKeyPair,
+    profile: &Profile,
+    store: &Store,
+    mls: &mut MlsClient,
+    group_id: ConversationId,
+    body: EventBody,
+) -> Result<(ConversationEvent, &'static str)> {
+    let group = profile
+        .groups
+        .iter()
+        .find(|group| group.id == group_id)
+        .cloned()
+        .context("group not found")?;
+    let frontier = store.load_events(group_id)?.into_iter().fold(
+        CausalFrontier::new(),
+        |mut frontier, event| {
+            frontier
+                .entry(event.author_device)
+                .and_modify(|value| *value = (*value).max(event.device_sequence))
+                .or_insert(event.device_sequence);
+            frontier
+        },
+    );
+    let mut builder =
+        ConversationBuilder::new(group_id, profile.identity_id, key.device_id(), frontier);
+    let event = builder.build(body, next_group_logical_time(store, group_id)?, &mut OsRng)?;
+    let ciphertext = mls.encrypt(group_id.as_bytes(), &event.to_wire()?)?;
+    store.save_event(&event)?;
+    let mut route = "direct";
+    for recipient in group_remote_contacts(profile, &group, key.device_id()) {
+        let delivery = deliver_payload_durable(
+            network,
+            key,
+            profile,
+            store,
+            group_id,
+            &recipient,
+            DirectPayload::GroupMessage {
+                group_id,
+                ciphertext: ciphertext.clone(),
+            },
+        )
+        .await?;
+        match delivery {
+            "queued" => route = "queued",
+            "mailbox" if route == "direct" => route = "mailbox",
+            _ => {}
+        }
+    }
+    Ok((event, route))
 }
 
 fn validate_group_file_sender(
@@ -2179,28 +3107,131 @@ async fn send_group_file_packets(
     Ok((transfer_id, file_name, metadata.len(), route))
 }
 
+async fn send_device_history(
+    network: &PeerNetwork,
+    key: &DeviceKeyPair,
+    profile: &Profile,
+    store: &Store,
+    recipient: &Contact,
+) -> Result<()> {
+    let messages = store.load_all_direct_messages()?;
+    for chunk in messages.chunks(4) {
+        let messages = chunk
+            .iter()
+            .map(|message| DeviceHistoryMessage {
+                message_id: message.message_id,
+                peer_identity: message.peer_identity,
+                sender_name: message.sender_name.clone(),
+                body: message.body.clone(),
+                sent_at_unix: message.sent_at_unix,
+                outgoing: message.outgoing,
+                reply_to: message.reply_to,
+                edited: message.edited,
+                deleted: message.deleted,
+                delivery: message.delivery.clone(),
+            })
+            .collect();
+        deliver_payload(
+            network,
+            key,
+            profile,
+            recipient,
+            DirectPayload::DeviceHistory { messages },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn handle_incoming_payload(
     store: &Store,
     profile_path: &Path,
+    local_identity: IdentityId,
     packet: &ChatPacket,
     shared_secret: [u8; 32],
     incoming_files: &mut std::collections::BTreeMap<[u8; 32], IncomingFile>,
     delivery: &str,
 ) -> Result<()> {
     match &packet.payload {
-        DirectPayload::Message { body } => {
+        DirectPayload::DeviceHistory { messages } => {
+            if packet.sender_identity != local_identity {
+                bail!("history sync is only accepted from another authorized local device");
+            }
+            for message in messages {
+                store.save_direct_message(&DirectMessageRecord {
+                    message_id: message.message_id,
+                    peer_identity: message.peer_identity,
+                    sender_name: message.sender_name.clone(),
+                    body: message.body.clone(),
+                    sent_at_unix: message.sent_at_unix,
+                    outgoing: message.outgoing,
+                    reply_to: message.reply_to,
+                    edited: message.edited,
+                    deleted: message.deleted,
+                    delivery: message.delivery.clone(),
+                    file_path: None,
+                })?;
+            }
+            emit_json(&serde_json::json!({"event":"history_synced", "messages":messages.len()}))?;
+        }
+        DirectPayload::Message {
+            message_id,
+            body,
+            reply_to,
+        } => {
+            let message_id = if *message_id == [0; 32] {
+                *blake3::hash(&packet.to_wire()?).as_bytes()
+            } else {
+                *message_id
+            };
             store.save_direct_message(&DirectMessageRecord {
-                message_id: *blake3::hash(&packet.to_wire()?).as_bytes(),
+                message_id,
                 peer_identity: packet.sender_identity,
                 sender_name: packet.sender_name.clone(),
                 body: body.clone(),
                 sent_at_unix: packet.sent_at_unix,
                 outgoing: false,
+                reply_to: *reply_to,
+                edited: false,
+                deleted: false,
+                delivery: "delivered".into(),
+                file_path: None,
             })?;
             emit_json(&serde_json::json!({
-                "event":"message", "from":packet.sender_name, "body":body,
+                "event":"message", "message_id":hex::encode(message_id),
+                "from":packet.sender_name, "body":body, "reply_to":reply_to.map(hex::encode),
                 "sent_at":packet.sent_at_unix, "delivery":delivery
             }))?;
+        }
+        DirectPayload::MessageEdit { target, body } => {
+            if store.update_direct_message(
+                *target,
+                packet.sender_identity,
+                false,
+                Some(body),
+                false,
+            )? {
+                emit_json(&serde_json::json!({
+                    "event":"message_edited", "contact":packet.sender_name,
+                    "message_id":hex::encode(target), "body":body
+                }))?;
+            }
+        }
+        DirectPayload::MessageDelete { target } => {
+            if store.update_direct_message(*target, packet.sender_identity, false, None, true)? {
+                emit_json(&serde_json::json!({
+                    "event":"message_deleted", "contact":packet.sender_name,
+                    "message_id":hex::encode(target)
+                }))?;
+            }
+        }
+        DirectPayload::DeliveryReceipt { target } => {
+            if store.set_direct_delivery(*target, "delivered")? {
+                emit_json(&serde_json::json!({
+                    "event":"message_delivered", "contact":packet.sender_name,
+                    "message_id":hex::encode(target)
+                }))?;
+            }
         }
         DirectPayload::FileOffer {
             transfer_id,
@@ -2239,11 +3270,44 @@ fn handle_incoming_payload(
         | DirectPayload::GroupWelcome { .. }
         | DirectPayload::GroupMessage { .. }
         | DirectPayload::GroupCommit { .. }
+        | DirectPayload::GroupProfileUpdate { .. }
+        | DirectPayload::GroupDissolve { .. }
         | DirectPayload::GroupFileOffer { .. }
         | DirectPayload::GroupFileChunk { .. }
         | DirectPayload::GroupSyncRequest { .. }
         | DirectPayload::GroupSyncEvent { .. } => {}
     }
+    Ok(())
+}
+
+async fn acknowledge_incoming_message(
+    network: &PeerNetwork,
+    key: &DeviceKeyPair,
+    profile: &Profile,
+    store: &Store,
+    packet: &ChatPacket,
+) -> Result<()> {
+    let DirectPayload::Message { message_id, .. } = &packet.payload else {
+        return Ok(());
+    };
+    if *message_id == [0; 32] {
+        return Ok(());
+    }
+    let Some(recipient) = profile.contacts.iter().find(|contact| {
+        contact.identity_id == packet.sender_identity && contact.device_id == packet.sender_device
+    }) else {
+        return Ok(());
+    };
+    let receipt = signed_direct_packet(
+        network,
+        key,
+        profile,
+        DirectPayload::DeliveryReceipt {
+            target: *message_id,
+        },
+    )?;
+    let conversation_id = direct_conversation_id(profile.identity_id, packet.sender_identity);
+    deliver_signed_packet_durable(network, store, conversation_id, recipient, &receipt).await?;
     Ok(())
 }
 
@@ -2296,6 +3360,11 @@ fn finish_incoming_file(
         body: format!("📎 {}", manifest.file_name),
         sent_at_unix: packet.sent_at_unix,
         outgoing: false,
+        reply_to: None,
+        edited: false,
+        deleted: false,
+        delivery: "delivered".into(),
+        file_path: Some(destination.to_string_lossy().into_owned()),
     })?;
     emit_json(&serde_json::json!({
         "event":"file_received", "from":packet.sender_name,
@@ -2310,7 +3379,7 @@ fn emit_contacts(profile: &Profile) -> Result<()> {
     let contacts = profile
         .contacts
         .iter()
-        .filter(|contact| contact.identity_id != profile.identity_id)
+        .filter(|contact| contact.identity_id != profile.identity_id && !contact.removed)
         .filter_map(|contact| {
             if emitted.contains(&contact.identity_id) {
                 return None;
@@ -2323,10 +3392,13 @@ fn emit_contacts(profile: &Profile) -> Result<()> {
                 .count();
             Some(serde_json::json!({
                 "name":contact.name,
+                "avatar":contact.avatar,
                 "identity_id":contact.identity_id,
                 "device_id":contact.device_id,
                 "device_count":device_count,
                 "verified":contact.verified,
+                "blocked":contact.blocked,
+                "hide_presence":contact.hide_presence,
                 "endpoint_id":contact.address.endpoint_id,
             }))
         })
@@ -2342,11 +3414,27 @@ fn emit_groups(profile: &Profile) -> Result<()> {
             serde_json::json!({
                 "id":group.id.to_string(), "name":group.name, "owner":group.owner,
                 "member_count":group.members.len(), "device_count":group.member_devices.len(),
-                "owned":group.owner == profile.identity_id
+                "admin_count":group.admins.len(),
+                "owned":group.owner == profile.identity_id,
+                "admin":group.admins.contains(&profile.identity_id)
             })
         })
         .collect::<Vec<_>>();
     emit_json(&serde_json::json!({"event":"groups", "groups":groups}))
+}
+
+fn emit_conversation_settings(store: &Store) -> Result<()> {
+    let settings = store
+        .load_conversation_settings()?
+        .into_iter()
+        .map(|item| serde_json::json!({
+            "conversation_key": item.conversation_key,
+            "pinned": item.pinned,
+            "archived": item.archived,
+            "muted": item.muted_until_unix.is_some_and(|until| until > OffsetDateTime::now_utc().unix_timestamp()),
+        }))
+        .collect::<Vec<_>>();
+    emit_json(&serde_json::json!({"event":"conversation_settings", "settings":settings}))
 }
 
 fn emit_devices(profile: &Profile) -> Result<()> {
@@ -2365,13 +3453,25 @@ fn emit_devices(profile: &Profile) -> Result<()> {
 }
 
 fn emit_group_history(store: &Store, profile: &Profile, group_id: ConversationId) -> Result<()> {
+    let messages = materialize_group_messages(store, profile, group_id)?;
+    emit_json(
+        &serde_json::json!({"event":"group_history", "group_id":group_id.to_string(), "messages":messages}),
+    )
+}
+
+fn materialize_group_messages(
+    store: &Store,
+    profile: &Profile,
+    group_id: ConversationId,
+) -> Result<Vec<serde_json::Value>> {
     if !profile.groups.iter().any(|group| group.id == group_id) {
         bail!("group not found");
     }
-    let messages = store
-        .load_events(group_id)?
-        .into_iter()
-        .filter_map(|event| match event.body {
+    let mut messages = Vec::new();
+    let mut positions = std::collections::BTreeMap::<EventId, usize>::new();
+    let mut authors = std::collections::BTreeMap::<EventId, IdentityId>::new();
+    for event in store.load_events(group_id)? {
+        match event.body {
             EventBody::MessageCreate { content } => {
                 let author = if event.author_identity == profile.identity_id {
                     profile.name.clone()
@@ -2385,35 +3485,100 @@ fn emit_group_history(store: &Store, profile: &Profile, group_id: ConversationId
                             |contact| contact.name.clone(),
                         )
                 };
-                Some(serde_json::json!({
+                positions.insert(event.event_id, messages.len());
+                authors.insert(event.event_id, event.author_identity);
+                messages.push(serde_json::json!({
                     "message_id":event.event_id.to_string(), "author":author, "body":content.text,
                     "sent_at":event.logical_time_ms / 1000,
-                    "outgoing":event.author_identity == profile.identity_id
-                }))
+                    "outgoing":event.author_identity == profile.identity_id,
+                    "reply_to":content.reply_to.map(|id| id.to_string()),
+                    "edited":false, "deleted":false, "delivery":"delivered"
+                }));
             }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    emit_json(
-        &serde_json::json!({"event":"group_history", "group_id":group_id.to_string(), "messages":messages}),
-    )
+            EventBody::MessageEdit { target, content }
+                if authors.get(&target) == Some(&event.author_identity) =>
+            {
+                if let Some(index) = positions.get(&target).copied()
+                    && let Some(message) = messages
+                        .get_mut(index)
+                        .and_then(serde_json::Value::as_object_mut)
+                {
+                    message.insert("body".into(), content.text.into());
+                    message.insert("edited".into(), true.into());
+                }
+            }
+            EventBody::MessageDelete { target }
+                if authors.get(&target) == Some(&event.author_identity) =>
+            {
+                if let Some(index) = positions.get(&target).copied()
+                    && let Some(message) = messages
+                        .get_mut(index)
+                        .and_then(serde_json::Value::as_object_mut)
+                {
+                    message.insert("body".into(), "".into());
+                    message.insert("deleted".into(), true.into());
+                    message.insert("edited".into(), false.into());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(messages)
 }
 
 fn emit_history(store: &Store, contact: &Contact) -> Result<()> {
     let messages = store
         .load_direct_messages(contact.identity_id, 2_000)?
+        .iter()
+        .map(direct_message_json)
+        .collect::<Vec<_>>();
+    emit_json(&serde_json::json!({"event":"history", "contact":contact.name, "messages":messages}))
+}
+
+fn emit_call_history(store: &Store, conversation: &str) -> Result<()> {
+    let calls = store
+        .load_call_events(conversation, 200)?
         .into_iter()
-        .map(|message| {
+        .map(|call| {
             serde_json::json!({
-                "message_id":hex::encode(message.message_id),
-                "author":message.sender_name,
-                "body":message.body,
-                "sent_at":message.sent_at_unix,
-                "outgoing":message.outgoing,
+                "call_id":hex::encode(call.call_id), "direction":call.direction,
+                "outcome":call.outcome, "started_at":call.started_at_unix,
+                "duration_ms":call.duration_ms,
             })
         })
         .collect::<Vec<_>>();
-    emit_json(&serde_json::json!({"event":"history", "contact":contact.name, "messages":messages}))
+    emit_json(&serde_json::json!({
+        "event":"call_history", "conversation":conversation, "calls":calls
+    }))
+}
+
+fn direct_message_json(message: &DirectMessageRecord) -> serde_json::Value {
+    serde_json::json!({
+        "message_id":hex::encode(message.message_id),
+        "peer_identity":message.peer_identity,
+        "author":message.sender_name,
+        "body":if message.deleted { "" } else { &message.body },
+        "sent_at":message.sent_at_unix,
+        "outgoing":message.outgoing,
+        "reply_to":message.reply_to.map(hex::encode),
+        "edited":message.edited,
+        "deleted":message.deleted,
+        "delivery":message.delivery,
+        "file_path":message.file_path,
+    })
+}
+
+fn random_message_id() -> [u8; 32] {
+    let mut id = [0; 32];
+    OsRng.fill_bytes(&mut id);
+    id
+}
+
+fn parse_message_id(value: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(value).context("message id is not hexadecimal")?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("message id must contain 32 bytes"))
 }
 
 fn emit_json(value: &serde_json::Value) -> Result<()> {
@@ -2505,13 +3670,16 @@ fn contact_devices(profile: &Profile, name: &str) -> Result<Vec<Contact>> {
     let identity = profile
         .contacts
         .iter()
-        .find(|contact| contact.name.eq_ignore_ascii_case(name))
+        .find(|contact| {
+            contact.name.eq_ignore_ascii_case(name) && !contact.removed && !contact.blocked
+        })
         .map(|contact| contact.identity_id)
         .context("contact not found")?;
     Ok(profile
         .contacts
         .iter()
         .filter(|contact| contact.identity_id == identity)
+        .filter(|contact| !contact.removed && !contact.blocked)
         .cloned()
         .collect())
 }
@@ -2532,15 +3700,14 @@ fn group_remote_contacts(
 }
 
 fn resolve_call_recipients(profile: &Profile, target: &str) -> Result<Vec<Contact>> {
-    if let Some(contact) = profile
-        .contacts
-        .iter()
-        .find(|contact| contact.name.eq_ignore_ascii_case(target))
-    {
+    if let Some(contact) = profile.contacts.iter().find(|contact| {
+        contact.name.eq_ignore_ascii_case(target) && !contact.removed && !contact.blocked
+    }) {
         return Ok(profile
             .contacts
             .iter()
             .filter(|candidate| candidate.identity_id == contact.identity_id)
+            .filter(|candidate| !candidate.removed && !candidate.blocked)
             .cloned()
             .collect());
     }
@@ -2549,6 +3716,9 @@ fn resolve_call_recipients(profile: &Profile, target: &str) -> Result<Vec<Contac
         .iter()
         .find(|group| group.name.eq_ignore_ascii_case(target) || group.id.to_string() == target)
         .context("contact or group not found")?;
+    if group.members.len() > 8 {
+        bail!("group calls support at most 8 participants");
+    }
     let local_device = DeviceKeyPair::from_secret_bytes(&profile.device_secret).device_id();
     let recipients = group_remote_contacts(profile, group, local_device);
     if recipients.is_empty() {
@@ -2582,6 +3752,14 @@ fn make_device_link(
     let new_device = DeviceKeyPair::generate(&mut OsRng);
     let mut identity =
         IdentityLog::from_events(profile.identity_id, profile.identity_events.clone())?;
+    if identity
+        .devices()
+        .filter(|device| device.revoked_at_unix.is_none())
+        .count()
+        >= 5
+    {
+        bail!("an identity can authorize at most five active devices");
+    }
     identity.add_device(
         &author,
         &new_device,
@@ -2596,6 +3774,7 @@ fn make_device_link(
     OsRng.fill_bytes(&mut self_shared_secret);
     let primary_contact = Contact {
         name: profile.name.clone(),
+        avatar: profile.avatar.clone(),
         identity_id: profile.identity_id,
         device_id: author.device_id(),
         public_key: author.public_key(),
@@ -2605,6 +3784,9 @@ fn make_device_link(
         verified: true,
         mls_key_package: profile.mls_key_package.clone(),
         identity_events: profile.identity_events.clone(),
+        blocked: false,
+        removed: false,
+        hide_presence: false,
     };
     let mut linked_contacts = profile
         .contacts
@@ -2617,6 +3799,7 @@ fn make_device_link(
         version: PROTOCOL_VERSION,
         expires_unix: (OffsetDateTime::now_utc() + Duration::minutes(10)).unix_timestamp(),
         name: profile.name.clone(),
+        avatar: profile.avatar.clone(),
         identity_id: profile.identity_id,
         device_secret: new_device.secret_bytes(),
         network_secret,
@@ -2633,6 +3816,7 @@ fn make_device_link(
         profile,
         Contact {
             name: profile.name.clone(),
+            avatar: profile.avatar.clone(),
             identity_id: profile.identity_id,
             device_id: new_device.device_id(),
             public_key: new_device.public_key(),
@@ -2646,6 +3830,9 @@ fn make_device_link(
             verified: true,
             mls_key_package: vec![],
             identity_events: profile.identity_events.clone(),
+            blocked: false,
+            removed: false,
+            hide_presence: false,
         },
     );
     let mut capability = [0; 32];
@@ -2691,6 +3878,7 @@ fn import_device(path: &Path, link: &Url) -> Result<()> {
     let profile = Profile {
         version: PROTOCOL_VERSION,
         name: bundle.name,
+        avatar: bundle.avatar,
         identity_id: bundle.identity_id,
         device_secret: bundle.device_secret,
         network_secret: bundle.network_secret,
@@ -3072,6 +4260,7 @@ fn refresh_contact_device(
         profile,
         Contact {
             name: packet.sender_name.clone(),
+            avatar: packet.sender_avatar.clone().or(template.avatar),
             identity_id: packet.sender_identity,
             device_id: packet.sender_device,
             public_key: packet.sender_public_key,
@@ -3081,6 +4270,9 @@ fn refresh_contact_device(
             verified: template.verified,
             mls_key_package: packet.mls_key_package.clone(),
             identity_events: packet.identity_events.clone(),
+            blocked: template.blocked,
+            removed: template.removed,
+            hide_presence: template.hide_presence,
         },
     );
     let log = IdentityLog::from_events(packet.sender_identity, packet.identity_events.clone())?;
@@ -3126,6 +4318,13 @@ mod tests {
 
     fn temporary_profile(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pptalk-cli-{label}-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn release_versions_compare_numerically() {
+        assert!(release_version("v0.10.0") > release_version("0.9.9"));
+        assert_eq!(release_version("v1.2.3"), Some((1, 2, 3)));
+        assert_eq!(release_version("not-a-version"), None);
     }
 
     #[test]

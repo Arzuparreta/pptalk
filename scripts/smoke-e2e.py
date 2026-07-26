@@ -24,6 +24,7 @@ class Peer:
             bufsize=1,
         )
         self.events: queue.Queue[dict] = queue.Queue()
+        self.pending: list[dict] = []
         self.reader = threading.Thread(target=self._read_events, daemon=True)
         self.reader.start()
 
@@ -41,6 +42,9 @@ class Peer:
         self.process.stdin.flush()
 
     def event(self, name: str, predicate=lambda _event: True, timeout: float = 30) -> dict:
+        for index, value in enumerate(self.pending):
+            if value.get("event") == name and predicate(value):
+                return self.pending.pop(index)
         deadline = time.monotonic() + timeout
         seen: list[str | None] = []
         while time.monotonic() < deadline:
@@ -51,6 +55,7 @@ class Peer:
             seen.append(value.get("event"))
             if value.get("event") == name and predicate(value):
                 return value
+            self.pending.append(value)
         stderr = ""
         if self.process.poll() is not None and self.process.stderr is not None:
             stderr = self.process.stderr.read()
@@ -67,6 +72,9 @@ class Peer:
         self.process.communicate()
 
     def assert_no_event(self, name: str, predicate=lambda _event: True, duration: float = 4) -> None:
+        for value in self.pending:
+            if value.get("event") == name and predicate(value):
+                raise RuntimeError(f"unexpected queued {name} after revocation: {value}")
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
             try:
@@ -75,6 +83,7 @@ class Peer:
                 return
             if value.get("event") == name and predicate(value):
                 raise RuntimeError(f"unexpected {name} after revocation: {value}")
+            self.pending.append(value)
 
 
 def main() -> None:
@@ -111,8 +120,31 @@ def main() -> None:
             bob.event("message_sent")
             alice.event("message", lambda event: event.get("body") == "hello Alice")
             alice.send({"command": "send", "contact": "Bob", "message": "hello Bob"})
-            alice.event("message_sent")
+            original_direct = alice.event("message_sent")
             bob.event("message", lambda event: event.get("body") == "hello Bob")
+            bob.send(
+                {
+                    "command": "send",
+                    "contact": "Alice",
+                    "message": "reply to Bob",
+                    "reply_to": original_direct["message_id"],
+                }
+            )
+            bob.event(
+                "message_sent",
+                lambda event: event.get("reply_to") == original_direct["message_id"],
+            )
+            alice.event("message", lambda event: event.get("body") == "reply to Bob")
+            alice.send(
+                {
+                    "command": "edit_message",
+                    "contact": "Bob",
+                    "message_id": original_direct["message_id"],
+                    "message": "hello Bob edited",
+                }
+            )
+            alice.event("message_edited")
+            bob.event("message_edited", lambda event: event.get("body") == "hello Bob edited")
 
             alice.send({"command": "start_call", "contact": "Bob", "ring": False})
             silent_call = alice.event("call_started")
@@ -145,7 +177,7 @@ def main() -> None:
                 }
             )
             bob.event("call_joined")
-            alice.event("call_join")
+            alice.event("call_connected")
             bob.send(
                 {
                     "command": "leave_call",
@@ -164,6 +196,36 @@ def main() -> None:
             bob.event(
                 "groups", lambda event: any(group["id"] == group_id for group in event["groups"])
             )
+            alice.send(
+                {"command": "group_send", "group_id": group_id, "message": "mutable group"}
+            )
+            mutable_group = alice.event(
+                "group_message",
+                lambda event: event.get("body") == "mutable group" and event.get("outgoing"),
+            )
+            bob.event("group_message", lambda event: event.get("body") == "mutable group")
+            alice.send(
+                {
+                    "command": "group_edit_message",
+                    "group_id": group_id,
+                    "message_id": mutable_group["message_id"],
+                    "message": "mutable group edited",
+                }
+            )
+            alice.event("group_message_edited")
+            bob.event(
+                "group_message_edited",
+                lambda event: event.get("body") == "mutable group edited",
+            )
+            alice.send(
+                {
+                    "command": "group_delete_message",
+                    "group_id": group_id,
+                    "message_id": mutable_group["message_id"],
+                }
+            )
+            alice.event("group_message_deleted")
+            bob.event("group_message_deleted")
 
             bob.close()
             alice.send({"command": "send", "contact": "Bob", "message": "queued direct"})
@@ -187,6 +249,14 @@ def main() -> None:
             bob.event(
                 "group_message", lambda event: event.get("body") == "causal reconnect", timeout=40
             )
+            alice.send({"command": "search", "query": "causal reconnect"})
+            group_search = alice.event("search_results")
+            if not any(
+                result.get("conversation_type") == "group"
+                and result.get("conversation_key") == group_id
+                for result in group_search.get("results", [])
+            ):
+                raise RuntimeError(f"group history was not searchable: {group_search}")
 
             alice.send(
                 {
@@ -210,6 +280,16 @@ def main() -> None:
             laptop = Peer(binary, laptop_profile)
             peers.append(laptop)
             laptop.event("ready")
+            laptop.event("history_synced", timeout=40)
+            laptop.send({"command": "history", "contact": "Bob"})
+            laptop_history = laptop.event("history")
+            if not any(
+                message.get("body") == "hello Bob edited" and message.get("edited")
+                for message in laptop_history.get("messages", [])
+            ):
+                raise RuntimeError(
+                    f"linked device did not receive edited direct history: {laptop_history}"
+                )
             laptop.event(
                 "groups",
                 lambda event: any(
@@ -247,7 +327,13 @@ def main() -> None:
             laptop.event("group_message", lambda event: event.get("body") == "all group devices")
 
             alice.send({"command": "devices"})
-            devices = alice.event("devices")
+            devices = alice.event(
+                "devices",
+                lambda event: any(
+                    device["active"] and not device["current"]
+                    for device in event["devices"]
+                ),
+            )
             laptop_id = next(
                 device["id"]
                 for device in devices["devices"]
@@ -284,7 +370,10 @@ def main() -> None:
             for peer in reversed(peers):
                 peer.close()
 
-    print("pptalk e2e smoke: calls, reconnect, MLS files, multi-device and revocation passed")
+    print(
+        "pptalk e2e smoke: replies, edits, calls, reconnect, MLS files, "
+        "history sync, multi-device and revocation passed"
+    )
 
 
 if __name__ == "__main__":

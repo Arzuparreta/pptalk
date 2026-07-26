@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 
 Item {
     id: root
@@ -6,6 +7,18 @@ Item {
     required property string body
     required property string time
     required property bool own
+    required property string messageId
+    required property string delivery
+    required property bool edited
+    required property bool deleted
+    required property string replyTo
+    required property string filePath
+    required property bool localDeleteAllowed
+    signal replyRequested(string messageId)
+    signal editRequested(string messageId, string body)
+    signal deleteRequested(string messageId)
+    signal deleteLocalRequested(string messageId)
+    signal openFileRequested(string path)
     width: ListView.view ? ListView.view.width : 500
     height: bubble.height + 14
 
@@ -39,8 +52,9 @@ Item {
             anchors.leftMargin: 14
             anchors.rightMargin: 14
             anchors.topMargin: 5
-            text: root.body
-            color: "#F6F4FA"
+            text: root.body + (root.edited ? "  (editado)" : "")
+            color: root.deleted ? "#9B95A5" : "#F6F4FA"
+            font.italic: root.deleted
             wrapMode: Text.Wrap
             font.pixelSize: 14
             lineHeight: 1.16
@@ -50,9 +64,48 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: 10
-            text: root.time + (root.own ? "  ✓✓" : "")
+            text: root.time + (root.own ? "  " + (root.delivery === "delivered" ? "Entregado" :
+                  (root.delivery === "direct" ? "Enviado · directo" :
+                  (root.delivery === "queued" ? "Pendiente" : "Enviado"))) : "")
             color: root.own ? "#C5BFFF" : "#777283"
             font.pixelSize: 10
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: root.filePath.length > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: mouse => {
+                if (mouse.button === Qt.RightButton) messageMenu.popup()
+                else if (root.filePath.length > 0) root.openFileRequested(root.filePath)
+            }
+        }
+
+        Menu {
+            id: messageMenu
+            MenuItem {
+                text: "Responder"
+                enabled: !root.deleted && root.messageId.length > 0
+                onTriggered: root.replyRequested(root.messageId)
+            }
+            MenuItem {
+                text: "Editar"
+                visible: root.own
+                enabled: !root.deleted && root.messageId.length > 0
+                onTriggered: root.editRequested(root.messageId, root.body)
+            }
+            MenuItem {
+                text: "Eliminar para mí"
+                visible: root.localDeleteAllowed
+                enabled: !root.deleted && root.messageId.length > 0
+                onTriggered: root.deleteLocalRequested(root.messageId)
+            }
+            MenuItem {
+                text: "Eliminar para todos"
+                visible: root.own
+                enabled: !root.deleted && root.messageId.length > 0
+                onTriggered: root.deleteRequested(root.messageId)
+            }
         }
     }
 }
