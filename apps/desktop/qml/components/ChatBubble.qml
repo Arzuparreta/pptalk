@@ -68,7 +68,8 @@ Item {
             anchors.margins: 10
             text: root.time + (root.own ? "  " + (root.delivery === "delivered" ? "Entregado" :
                   (root.delivery === "direct" ? "Enviado · directo" :
-                  (root.delivery === "queued" ? "Pendiente" : "Enviado"))) : "")
+                  (root.delivery === "mailbox" ? "Enviado · buzón" :
+                  (root.delivery === "queued" ? "Pendiente" : "Enviado")))) : "")
             color: root.own ? "#C5BFFF" : "#777283"
             font.pixelSize: 10
         }

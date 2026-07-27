@@ -995,6 +995,7 @@ async fn daemon(path: &Path) -> Result<()> {
         "name":profile.name,
         "avatar":profile.avatar,
         "secure_storage":profile.database_key_in_keyring,
+        "mailbox_url":profile.mailbox_url,
         "address":network.local_address()
     }))?;
     emit_contacts(&profile)?;
@@ -1312,7 +1313,45 @@ async fn daemon(path: &Path) -> Result<()> {
                         }
                         profile.mailbox_url = url;
                         save_profile(path, &profile)?;
-                        emit_json(&serde_json::json!({"event":"mailbox_configured", "url":profile.mailbox_url}))?;
+                        let probe = match &profile.mailbox_url {
+                            Some(base) => probe_mailbox(base).await,
+                            None => Ok(()),
+                        };
+                        // Contacts only learn a mailbox from the packets we send them, and we
+                        // may go offline before sending anything else. Announce the change now;
+                        // durable delivery reaches contacts that are already offline.
+                        let mut announced = 0_usize;
+                        for recipient in profile
+                            .contacts
+                            .iter()
+                            .filter(|contact| !contact.removed && !contact.blocked)
+                        {
+                            match deliver_payload_durable(
+                                &network,
+                                &key,
+                                &profile,
+                                &store,
+                                direct_conversation_id(profile.identity_id, recipient.identity_id),
+                                recipient,
+                                DirectPayload::DeviceHello,
+                            )
+                            .await
+                            {
+                                Ok(_) => announced += 1,
+                                Err(error) => tracing::debug!(
+                                    %error,
+                                    contact = %recipient.name,
+                                    "mailbox announcement deferred"
+                                ),
+                            }
+                        }
+                        emit_json(&serde_json::json!({
+                            "event":"mailbox_configured",
+                            "mailbox_url":profile.mailbox_url,
+                            "reachable":probe.is_ok(),
+                            "detail":probe.err(),
+                            "announced":announced
+                        }))?;
                     }
                     DaemonCommand::LinkDevice { label } => {
                         let url = daemon_or_continue!(make_device_link(
@@ -4603,6 +4642,26 @@ fn mailbox_endpoint(base: &Url, route: &[u8; 32]) -> Result<Url> {
     Ok(endpoint)
 }
 
+/// Confirms a freshly configured mailbox answers, so a typo surfaces now instead
+/// of the first time a contact is offline. The error is a technical detail for
+/// logs; the client renders its own message from the `reachable` flag.
+async fn probe_mailbox(base: &Url) -> std::result::Result<(), String> {
+    let mut endpoint = base.clone();
+    let prefix = endpoint.path().trim_end_matches('/');
+    endpoint.set_path(&format!("{prefix}/healthz"));
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    match client.get(endpoint).send().await {
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => Err(format!("mailbox answered HTTP {}", response.status())),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 async fn deposit_to_any_mailbox(bases: &[Url], route: &[u8; 32], envelope: &[u8]) -> Result<()> {
     if bases.is_empty() {
         bail!("recipient has no mailbox fallback");
@@ -5066,6 +5125,44 @@ mod tests {
 
     fn temporary_profile(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pptalk-cli-{label}-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn mailbox_endpoints_reject_unsafe_bases_and_keep_path_prefixes() {
+        let route = [7_u8; 32];
+        let hex_route = hex::encode(route);
+
+        let public = mailbox_endpoint(&"https://buzon.example".parse().unwrap(), &route)
+            .expect("https base is accepted");
+        assert_eq!(public.path(), format!("/v1/mailboxes/{hex_route}/messages"));
+
+        let prefixed = mailbox_endpoint(&"https://buzon.example/pptalk/".parse().unwrap(), &route)
+            .expect("path prefix is preserved");
+        assert_eq!(
+            prefixed.path(),
+            format!("/pptalk/v1/mailboxes/{hex_route}/messages")
+        );
+
+        // Queries and fragments on the base must never leak into the request.
+        let noisy = mailbox_endpoint(&"https://buzon.example/?a=1#b".parse().unwrap(), &route)
+            .expect("noisy base is accepted");
+        assert_eq!(noisy.query(), None);
+        assert_eq!(noisy.fragment(), None);
+
+        for loopback in ["http://127.0.0.1:9464", "http://localhost:9464"] {
+            assert!(
+                mailbox_endpoint(&loopback.parse().unwrap(), &route).is_ok(),
+                "loopback HTTP is allowed for development: {loopback}"
+            );
+        }
+        assert!(
+            mailbox_endpoint(&"http://buzon.example".parse().unwrap(), &route).is_err(),
+            "plain HTTP off loopback must be rejected"
+        );
+        assert!(
+            mailbox_endpoint(&"https://user:pass@buzon.example".parse().unwrap(), &route).is_err(),
+            "embedded credentials must be rejected"
+        );
     }
 
     #[test]

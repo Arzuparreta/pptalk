@@ -1,12 +1,16 @@
-# Buzón HTTP legado para desarrollo
+# Buzón para mensajes sin conexión
 
-El cliente de escritorio ya no ofrece este componente como opción de producto.
-Se conserva para pruebas de compatibilidad y no se incluye en los instaladores.
+Es un componente opcional. pptalk funciona sin él y no se incluye en los
+instaladores, pero el cliente de escritorio sí permite configurarlo desde
+**Ajustes → Buzón para mensajes sin conexión**.
 
 ## ¿Lo necesitas?
 
-No para hablar cuando ambos dispositivos están conectados. El buzón solo ayuda a
-entregar mensajes ya cifrados mientras alguien está desconectado.
+No para hablar cuando ambos dispositivos están conectados. Sirve para un caso
+concreto: alguien te escribe, tú estás desconectado, y quien escribe cierra
+pptalk antes de que vuelvas. Sin buzón ese mensaje espera en el equipo de quien
+lo envió hasta que coincidáis conectados. Con buzón, el mensaje ya cifrado queda
+depositado y llega la próxima vez que abras la aplicación.
 
 El nodo:
 
@@ -15,6 +19,11 @@ El nodo:
 - no recibe claves de descifrado;
 - no participa en llamadas;
 - sí puede observar horarios, tamaños y capacidades de buzón.
+
+Configuras **tu** buzón, no el de tus contactos. Es donde tus amigos dejan lo
+que te envían mientras estás fuera. Cuando lo guardas, pptalk avisa a tus
+contactos de la dirección; si alguno está desconectado, el aviso espera y le
+llega al reconectar.
 
 ## Probarlo en local
 
@@ -63,18 +72,24 @@ Los límites actuales son:
 - 256 MiB por capacidad;
 - 7 días de retención máxima.
 
-## Usarlo con el cliente headless legado
+## Usarlo desde la aplicación
 
-El escritorio no expone este ajuste. Para una prueba headless:
+Abre **Ajustes**, baja hasta **Buzón para mensajes sin conexión**, escribe la
+dirección y pulsa **Guardar buzón**. pptalk comprueba que responde y te lo dice.
+Si la dirección es incorrecta el ajuste se guarda igualmente, pero verás un
+aviso: hasta que responda, los mensajes seguirán esperando en el equipo de quien
+los envía. **Quitar buzón** vuelve al comportamiento anterior.
+
+Solo se acepta HTTPS. HTTP queda permitido únicamente en direcciones loopback
+para desarrollo. Dos personas pueden usar el mismo nodo sin compartir capacidad:
+cada ruta de entrega utiliza un token distinto.
+
+Para una prueba headless:
 
 ```sh
 pptalk-cli init --profile alice.json --name Alice \
   --mailbox-url https://pptalk.example
 ```
-
-HTTP se acepta únicamente en direcciones loopback para desarrollo. Dos personas
-pueden usar el mismo nodo sin compartir capacidad: cada ruta de entrega utiliza
-un token distinto.
 
 ## API mínima
 
@@ -86,3 +101,11 @@ GET  /v1/mailboxes/<64-caracteres-hex>/messages?limit=128
 
 El cuerpo de `POST` es opaco. `GET` drena el lote solicitado; los clientes se
 encargan de autenticidad, descifrado y deduplicación.
+
+Esos 64 caracteres son una capacidad portadora: quien la conozca puede depositar
+en esa ruta y, como `GET` vacía el lote, también puede quedarse con lo que haya
+sin que llegue a su destinatario. No podría leerlo —va cifrado de extremo a
+extremo— pero sí impedir que llegue. La capacidad se deriva del secreto que
+compartes con cada contacto y de su dispositivo, así que no aparece en la red ni
+la conoce el operador del nodo, pero conviene tenerlo presente al elegir en quién
+confías para alojarlo.

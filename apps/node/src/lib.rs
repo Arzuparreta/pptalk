@@ -294,4 +294,86 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn retention_is_capped_regardless_of_the_requested_ttl() {
+        let (store, path) = temporary_store();
+        let capability = [4; 32];
+        store
+            .deposit(&capability, b"ciphertext", u64::MAX, 0)
+            .expect("deposit");
+        let max_ttl = i64::try_from(DEFAULT_MAX_TTL_SECONDS).expect("ttl fits");
+        assert!(
+            store
+                .drain(&capability, 10, max_ttl + 1)
+                .expect("drain past the cap")
+                .is_empty(),
+            "a caller must not be able to hold storage beyond the retention limit"
+        );
+
+        store
+            .deposit(&capability, b"ciphertext", u64::MAX, 0)
+            .expect("deposit");
+        assert_eq!(
+            store
+                .drain(&capability, 10, max_ttl - 1)
+                .expect("drain within the cap")
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_and_empty_envelopes_are_rejected() {
+        let (store, path) = temporary_store();
+        let capability = [5; 32];
+        assert!(matches!(
+            store.deposit(&capability, b"", 60, 10),
+            Err(NodeError::EnvelopeSize)
+        ));
+        let oversized = vec![0_u8; DEFAULT_MAX_ENVELOPE_BYTES + 1];
+        assert!(matches!(
+            store.deposit(&capability, &oversized, 60, 10),
+            Err(NodeError::EnvelopeSize)
+        ));
+        assert!(
+            store.drain(&capability, 10, 11).expect("drain").is_empty(),
+            "a rejected deposit must not consume storage"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_full_mailbox_rejects_deposits_without_touching_its_neighbours() {
+        let path =
+            std::env::temp_dir().join(format!("pptalk-node-{}.sqlite3", uuid::Uuid::new_v4()));
+        let store = MailboxStore::open(NodeConfig {
+            database_path: path.clone(),
+            mailbox_quota_bytes: 32,
+            ..NodeConfig::at(".")
+        })
+        .expect("store");
+        let flooded = [6; 32];
+        let neighbour = [7; 32];
+        store
+            .deposit(&flooded, &[0_u8; 24], 60, 10)
+            .expect("first deposit fits");
+        assert!(matches!(
+            store.deposit(&flooded, &[0_u8; 24], 60, 10),
+            Err(NodeError::Quota)
+        ));
+        // Quota is per capability: one noisy route must not deny service to another.
+        store
+            .deposit(&neighbour, &[0_u8; 24], 60, 10)
+            .expect("neighbour is unaffected");
+        assert_eq!(store.drain(&flooded, 10, 11).expect("drain").len(), 1);
+        assert_eq!(store.drain(&neighbour, 10, 11).expect("drain").len(), 1);
+
+        // Draining frees the quota again.
+        store
+            .deposit(&flooded, &[0_u8; 24], 60, 10)
+            .expect("space is reclaimed after a drain");
+        let _ = std::fs::remove_file(path);
+    }
 }

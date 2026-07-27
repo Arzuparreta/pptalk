@@ -66,8 +66,10 @@ existe tráfico, pero no el contenido.
 No hay que configurar un servidor ni enviar un código en cada llamada. Los
 contactos aceptados y el historial se conservan localmente. Si el destinatario
 está desconectado, el envío queda pendiente en tu dispositivo hasta que vuelve a
-existir una ruta; el almacenamiento distribuido sin conexión todavía está en
-evaluación y no se anuncia como disponible.
+existir una ruta: hace falta que coincidáis abiertos en algún momento. Si eso no
+te vale, en **Ajustes** puedes indicar un buzón donde tus amigos dejen lo que te
+envían mientras no estás. Es opcional, viene desactivado y solo guarda datos ya
+cifrados; consulta [alojar un buzón](docs/self-hosting.md).
 
 Tus claves y tu historial viven en tus dispositivos. En **Ajustes** puedes
 proteger la clave del historial con el almacén seguro del sistema y crear una

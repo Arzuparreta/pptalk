@@ -929,6 +929,47 @@ ApplicationWindow {
                 wrapMode: Text.Wrap
                 font.pixelSize: 10
             }
+            Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
+            Text { text: "Buzón para mensajes sin conexión"; color: window.text; font.pixelSize: 13; font.weight: Font.DemiBold }
+            Text {
+                Layout.fillWidth: true
+                text: "Sin buzón, lo que envías espera en este equipo hasta que tu amigo y tú "
+                    + "estéis conectados a la vez. Un buzón guarda el mensaje ya cifrado mientras "
+                    + "tanto. Quien lo administre ve horarios y tamaños, nunca el contenido."
+                color: window.muted
+                wrapMode: Text.Wrap
+                font.pixelSize: 10
+            }
+            TextField {
+                id: mailboxField
+                Layout.fillWidth: true
+                text: App.mailboxUrl
+                placeholderText: "https://buzon.example"
+            }
+            RowLayout {
+                Button {
+                    text: "Guardar buzón"
+                    // The daemon normalizes the URL, so ignore a trailing slash when
+                    // deciding whether the field still differs from what is stored.
+                    enabled: mailboxField.text.trim().length > 0
+                        && mailboxField.text.trim().replace(/\/+$/, "")
+                           !== App.mailboxUrl.replace(/\/+$/, "")
+                    onClicked: App.setMailbox(mailboxField.text)
+                }
+                Button {
+                    text: "Quitar buzón"
+                    enabled: App.mailboxUrl.length > 0
+                    onClicked: { mailboxField.text = ""; App.clearMailbox() }
+                }
+            }
+            Text {
+                visible: App.mailboxStatus.length > 0
+                Layout.fillWidth: true
+                text: App.mailboxStatus
+                color: App.mailboxUrl.length > 0 ? "#77D8B1" : window.muted
+                wrapMode: Text.Wrap
+                font.pixelSize: 10
+            }
             }
         }
     }

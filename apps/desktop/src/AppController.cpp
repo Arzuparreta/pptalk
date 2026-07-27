@@ -294,6 +294,8 @@ bool AppController::onboardingRequired() const { return m_onboardingRequired; }
 QString AppController::onboardingLink() const { return m_onboardingLink; }
 QString AppController::backupStatus() const { return m_backupStatus; }
 bool AppController::secureStorageEnabled() const { return m_secureStorageEnabled; }
+QString AppController::mailboxUrl() const { return m_mailboxUrl; }
+QString AppController::mailboxStatus() const { return m_mailboxStatus; }
 QString AppController::microphoneTestStatus() const { return m_microphoneTestStatus; }
 bool AppController::archivedVisible() const { return m_archivedVisible; }
 bool AppController::callActive() const { return m_callActive; }
@@ -617,6 +619,29 @@ void AppController::protectLocalSecrets()
 {
     if (m_secureStorageEnabled) return;
     sendBackendCommand({{QStringLiteral("command"), QStringLiteral("protect_local_secrets")}});
+}
+
+void AppController::setMailbox(const QString &url)
+{
+    const QString trimmed = url.trimmed();
+    if (trimmed.isEmpty()) {
+        clearMailbox();
+        return;
+    }
+    m_mailboxStatus = QStringLiteral("Comprobando el buzón…");
+    m_mailboxPending = true;
+    emit settingsChanged();
+    sendBackendCommand({{QStringLiteral("command"), QStringLiteral("set_mailbox")},
+                        {QStringLiteral("url"), trimmed}});
+}
+
+void AppController::clearMailbox()
+{
+    m_mailboxStatus = QStringLiteral("Quitando el buzón…");
+    m_mailboxPending = true;
+    emit settingsChanged();
+    sendBackendCommand({{QStringLiteral("command"), QStringLiteral("set_mailbox")},
+                        {QStringLiteral("url"), QVariant()}});
 }
 
 void AppController::testMicrophone()
@@ -1601,6 +1626,23 @@ void AppController::processBackendOutput()
         } else if (event == QStringLiteral("secure_storage")) {
             m_secureStorageEnabled = object.value(QStringLiteral("enabled")).toBool();
             emit settingsChanged();
+        } else if (event == QStringLiteral("mailbox_configured")) {
+            m_mailboxPending = false;
+            m_mailboxUrl = object.value(QStringLiteral("mailbox_url")).toString();
+            if (m_mailboxUrl.isEmpty()) {
+                m_mailboxStatus =
+                    QStringLiteral("Sin buzón. Los mensajes esperarán en este equipo hasta que "
+                                   "ambos estéis conectados a la vez.");
+            } else if (object.value(QStringLiteral("reachable")).toBool()) {
+                const int announced = object.value(QStringLiteral("announced")).toInt();
+                m_mailboxStatus =
+                    QStringLiteral("Buzón activo. Se avisó a %1 contacto(s).").arg(announced);
+            } else {
+                m_mailboxStatus =
+                    QStringLiteral("Guardado, pero el buzón no respondió. Revisa la dirección: "
+                                   "hasta que responda, los mensajes seguirán esperando aquí.");
+            }
+            emit settingsChanged();
         } else if (event == QStringLiteral("microphone_test")) {
             m_microphoneTestStatus =
                 object.value(QStringLiteral("detected")).toBool()
@@ -1621,13 +1663,25 @@ void AppController::processBackendOutput()
             emit updateChanged();
         } else if (event == QStringLiteral("error")) {
             m_lastError = object.value(QStringLiteral("message")).toString();
+            // A rejected address never produces mailbox_configured, so the pending
+            // status would otherwise sit there claiming it is still checking.
+            if (m_mailboxPending) {
+                m_mailboxPending = false;
+                m_mailboxStatus =
+                    QStringLiteral("No se pudo guardar el buzón: %1").arg(m_lastError);
+                emit settingsChanged();
+            }
             emit connectionChanged();
         } else if (event == QStringLiteral("ready")) {
             m_lastError.clear();
             m_backendRestartAttempts = 0;
             m_profileName = object.value(QStringLiteral("name")).toString(m_profileName);
             m_profileAvatar = object.value(QStringLiteral("avatar")).toString();
+            m_mailboxUrl = object.value(QStringLiteral("mailbox_url")).toString();
+            m_mailboxStatus.clear();
+            m_mailboxPending = false;
             emit profileChanged();
+            emit settingsChanged();
             sendBackendCommand({{QStringLiteral("command"), QStringLiteral("check_update")}});
             sendBackendCommand({{QStringLiteral("command"), QStringLiteral("media_capabilities")}});
             emit connectionChanged();

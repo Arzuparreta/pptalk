@@ -75,11 +75,17 @@ Cada autor mantiene una secuencia monotónica por dispositivo. Al reconectar, lo
 peers comparan sus fronteras causales y transmiten únicamente los eventos que
 faltan.
 
-Si ninguna ruta está disponible, el sobre cifrado permanece en el outbox del
-emisor. El cliente de escritorio no configura buzones. El prototipo Veilid está
-aislado en `crates/distributed`: publica datos reales, pero la recuperación desde
-un segundo nodo provoca un fallo de apagado reproducible en Veilid 0.5.7. Por eso
-no forma parte de la ruta del producto.
+La entrega es una cascada de tres escalones: conexión directa, depósito en el
+buzón del destinatario si lo tiene configurado, y outbox local del emisor como
+último recurso. El outbox reintenta con espera exponencial, pero solo mientras el
+emisor siga abierto; el buzón es el único escalón que sobrevive a presencias que
+nunca coinciden. Es opcional y viene desactivado. Al configurarlo, el cliente lo
+anuncia a sus contactos por la misma cascada, de modo que un contacto
+desconectado se entera al reconectar.
+
+El prototipo Veilid está aislado en `crates/distributed`: publica datos reales,
+pero la recuperación desde un segundo nodo provoca un fallo de apagado
+reproducible en Veilid 0.5.7. Por eso no forma parte de la ruta del producto.
 
 Un miembro nuevo de un grupo solo puede sincronizar desde el momento en que fue
 admitido. Los mensajes anteriores no forman parte de su historial autorizado.
@@ -101,10 +107,11 @@ atravesado de NAT. pptalk separa dos canales:
 - `pptalk/sync/1`: mensajes duraderos, archivos y sincronización;
 - `pptalk/call/1`: señales efímeras de llamada.
 
-`pptalk-node` conserva el buzón HTTP legado para pruebas de compatibilidad, pero
-no se incluye en los paquetes ni arranca por defecto. No es un servidor de
-cuentas, un SFU ni una autoridad de grupos. El relay/NAT traversal en vivo lo
-proporciona Iroh.
+`pptalk-node` es un buzón HTTP opcional que el usuario puede configurar desde
+Ajustes. No se incluye en los paquetes ni arranca por defecto. No es un servidor
+de cuentas, un SFU ni una autoridad de grupos: solo acepta y devuelve sobres
+opacos indexados por una capacidad derivada del secreto compartido de cada
+contacto. El relay/NAT traversal en vivo lo proporciona Iroh.
 
 ## Llamadas y multimedia
 

@@ -19,6 +19,14 @@ volumen de tráfico generan y durante cuánto tiempo. Un buzón conoce tamaños,
 caducidades y el uso de cada capacidad. El padding reduce filtraciones de tamaño,
 pero pptalk no es una red de anonimato.
 
+Si activas un buzón, aceptas esa exposición a cambio de recibir mensajes cuando
+no coincides conectado con quien te escribe. La ruta que identifica tu buzón es
+una capacidad portadora: quien la conociera podría depositar en ella y, como la
+lectura vacía el lote, también quedarse con lo que hubiera dentro. No podría
+leerlo, pero sí impedir que te llegue. Esa ruta se deriva del secreto que
+compartes con cada contacto, así que el operador del nodo no la deduce de lo que
+almacena. Sin buzón configurado nada de esto aplica.
+
 Los nombres visibles de los contactos no están registrados globalmente.
 
 ## Qué debe ser de confianza

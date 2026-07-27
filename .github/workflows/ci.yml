@@ -20,7 +20,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo build -p pptalk-cli --locked
+      - run: cargo build -p pptalk-cli -p pptalk-node --locked
       - run: python3 scripts/smoke-e2e.py
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit

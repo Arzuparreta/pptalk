@@ -46,6 +46,8 @@ class AppController final : public QObject
     Q_PROPERTY(QString onboardingLink READ onboardingLink NOTIFY onboardingChanged)
     Q_PROPERTY(QString backupStatus READ backupStatus NOTIFY backupStatusChanged)
     Q_PROPERTY(bool secureStorageEnabled READ secureStorageEnabled NOTIFY settingsChanged)
+    Q_PROPERTY(QString mailboxUrl READ mailboxUrl NOTIFY settingsChanged)
+    Q_PROPERTY(QString mailboxStatus READ mailboxStatus NOTIFY settingsChanged)
     Q_PROPERTY(QString microphoneTestStatus READ microphoneTestStatus NOTIFY settingsChanged)
     Q_PROPERTY(bool archivedVisible READ archivedVisible WRITE setArchivedVisible NOTIFY settingsChanged)
     Q_PROPERTY(bool callActive READ callActive NOTIFY callChanged)
@@ -102,6 +104,8 @@ public:
     [[nodiscard]] QString onboardingLink() const;
     [[nodiscard]] QString backupStatus() const;
     [[nodiscard]] bool secureStorageEnabled() const;
+    [[nodiscard]] QString mailboxUrl() const;
+    [[nodiscard]] QString mailboxStatus() const;
     [[nodiscard]] QString microphoneTestStatus() const;
     [[nodiscard]] bool archivedVisible() const;
     [[nodiscard]] bool callActive() const;
@@ -138,6 +142,8 @@ public:
     Q_INVOKABLE void exportIdentityBackup(const QUrl &file, const QString &passphrase);
     Q_INVOKABLE void restoreIdentityBackup(const QUrl &file, const QString &passphrase);
     Q_INVOKABLE void protectLocalSecrets();
+    Q_INVOKABLE void setMailbox(const QString &url);
+    Q_INVOKABLE void clearMailbox();
     Q_INVOKABLE void testMicrophone();
     Q_INVOKABLE QString draft() const;
     Q_INVOKABLE void saveDraft(const QString &body);
@@ -272,6 +278,9 @@ private:
     bool m_onboardingRequired = false;
     bool m_archivedVisible = false;
     bool m_secureStorageEnabled = false;
+    QString m_mailboxUrl;
+    QString m_mailboxStatus;
+    bool m_mailboxPending = false;
     QString m_microphoneTestStatus;
     int m_backendRestartAttempts = 0;
     bool m_shuttingDown = false;

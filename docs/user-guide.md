@@ -129,11 +129,31 @@ muestra el error en vez de reducir la calidad silenciosamente.
 
 ## Mensajes cuando alguien está desconectado
 
-pptalk conserva localmente los envíos pendientes y vuelve a intentarlos cuando
-los dos dispositivos pueden encontrarse. La aplicación no pide una URL de buzón
-ni depende de un servidor del proyecto. La ruta distribuida para entregar con
-ambos clientes desconectados aún no ha superado la prueba de viabilidad, por lo
-que esta versión no promete entrega offline.
+De forma predeterminada, pptalk guarda los envíos pendientes en tu equipo y los
+reintenta cuando los dos dispositivos pueden encontrarse. Bajo el mensaje verás
+**Pendiente** mientras espera y **Entregado** cuando llega.
+
+Eso tiene un límite: si escribes a alguien desconectado y cierras pptalk antes
+de que vuelva, el mensaje sigue esperando en tu equipo. Se enviará la próxima vez
+que coincidáis abiertos, no antes.
+
+### Recibir mientras no estás
+
+Para que no haga falta coincidir, indica un buzón en
+**Ajustes → Buzón para mensajes sin conexión**: escribe su dirección y pulsa
+**Guardar buzón**. pptalk comprueba que responde y avisa a tus contactos de la
+dirección; a los que estén desconectados les llegará el aviso al reconectar.
+
+A partir de ahí, quien te escriba mientras estás fuera deja el mensaje ya
+cifrado en ese buzón y tú lo recibes al abrir la aplicación. Bajo el mensaje, el
+remitente verá **Enviado · buzón**.
+
+El buzón guarda datos cifrados y no puede leerlos, pero quien lo administre sí
+ve cuándo y cuánto se deposita. No hay ninguno configurado de fábrica y el
+proyecto no ofrece uno: tienes que alojarlo tú o usar el de alguien de confianza.
+La [guía para alojar un buzón](self-hosting.md) explica cómo montarlo.
+
+**Quitar buzón** vuelve al comportamiento anterior en cualquier momento.
 
 ## Usar la identidad en otro dispositivo
 
@@ -171,6 +191,8 @@ En **Pulsar para hablar**, elige `Ctrl + Espacio`, `Alt + Espacio` o `F8`. El
 atajo funciona mientras pptalk tiene el foco. Cuando hay
 una versión publicada más nueva, **Ajustes** muestra su descarga; los paquetes
 AUR se actualizan con el gestor de paquetes.
+**Buzón para mensajes sin conexión** está vacío de fábrica y se explica en
+[mensajes cuando alguien está desconectado](#mensajes-cuando-alguien-está-desconectado).
 
 ## Proteger y copiar la identidad
 
@@ -212,9 +234,14 @@ Comprueba que Qt y GStreamer cumplen las versiones de la
 ### Un mensaje no llega
 
 - Mira la etiqueta de conexión de la conversación.
+- Mira la etiqueta bajo el mensaje: **Pendiente** significa que sigue esperando
+  en tu equipo, no que se haya perdido.
 - Mantén ambos clientes abiertos para forzar un nuevo intento directo.
-- Si la otra persona está desconectada, espera a que ambos clientes vuelvan a
-  estar abiertos: esta versión no promete entrega offline distribuida.
+- Si la otra persona está desconectada y ninguna de las dos tiene buzón, espera a
+  que ambos clientes vuelvan a estar abiertos. Para no depender de eso, consulta
+  [mensajes cuando alguien está desconectado](#mensajes-cuando-alguien-está-desconectado).
+- Si tienes buzón configurado y el estado dice que no responde, revisa su
+  dirección: mientras tanto, los envíos vuelven a quedarse pendientes.
 
 ### Aparece un error de base de datos o MLS
 

@@ -6,11 +6,56 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import socket
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class Node:
+    """An opaque mailbox so store-and-forward can be exercised for real."""
+
+    def __init__(self, binary: Path, data_dir: Path) -> None:
+        self.port = free_port()
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.process = subprocess.Popen(
+            [str(binary), "--listen", f"127.0.0.1:{self.port}", "--data-dir", str(data_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                stderr = self.process.stderr.read() if self.process.stderr else ""
+                raise RuntimeError(f"mailbox node exited early: {stderr}")
+            try:
+                with urllib.request.urlopen(f"{self.url}/healthz", timeout=1) as response:
+                    if response.status == 200:
+                        return
+            except (urllib.error.URLError, OSError, TimeoutError):
+                time.sleep(0.2)
+        raise RuntimeError(f"mailbox node never became healthy on {self.url}")
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.communicate(timeout=8)
+                return
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        self.process.communicate()
 
 
 class Peer:
@@ -89,10 +134,13 @@ class Peer:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, default=Path("target/debug/pptalk-cli"))
+    parser.add_argument("--node-binary", type=Path, default=Path("target/debug/pptalk-node"))
     args = parser.parse_args()
     binary = args.binary.resolve()
+    node_binary = args.node_binary.resolve()
     repository = Path(__file__).resolve().parent.parent
     peers: list[Peer] = []
+    node: Node | None = None
     with tempfile.TemporaryDirectory(prefix="pptalk-e2e-") as temporary:
         root = Path(temporary)
         alice_profile = root / "alice.json"
@@ -418,13 +466,94 @@ def main() -> None:
                 raise RuntimeError(f"revoked device remained a delivery target: {delivered}")
             alice.event("message", lambda event: event.get("body") == "after revoke")
             laptop.assert_no_event("message", lambda event: event.get("body") == "after revoke")
+
+            # Store-and-forward. Everything above needed both daemons alive at the
+            # same time; this is the only path that survives presences that never
+            # overlap. A fresh pair keeps the assertions free of accumulated state.
+            node = Node(node_binary, root / "mailbox-data")
+            carol_profile = root / "carol.json"
+            dave_profile = root / "dave.json"
+            for profile, name in ((carol_profile, "Carol"), (dave_profile, "Dave")):
+                subprocess.run(
+                    [str(binary), "init", "--profile", str(profile), "--name", name],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+            carol, dave = Peer(binary, carol_profile), Peer(binary, dave_profile)
+            peers.extend((carol, dave))
+            carol.event("ready")
+            dave.event("ready")
+            carol.send({"command": "invite", "expires_seconds": 3600})
+            dave.send({"command": "accept", "url": carol.event("invite")["url"]})
+            dave.event(
+                "contacts",
+                lambda event: any(
+                    contact.get("name") == "Carol" for contact in event.get("contacts", [])
+                ),
+            )
+            carol.event(
+                "contacts",
+                lambda event: any(
+                    contact.get("name") == "Dave" for contact in event.get("contacts", [])
+                ),
+            )
+
+            # Dave is away when Carol picks a mailbox, so the announcement has to
+            # wait in her outbox. Without it he would never learn where to deposit.
+            dave.close()
+            carol.send({"command": "set_mailbox", "url": node.url})
+            configured = carol.event("mailbox_configured", timeout=60)
+            if not configured.get("reachable"):
+                raise RuntimeError(f"mailbox probe failed: {configured}")
+            # The daemon stores a normalized URL, so compare without the trailing slash.
+            if str(configured.get("mailbox_url", "")).rstrip("/") != node.url.rstrip("/"):
+                raise RuntimeError(f"mailbox was not stored: {configured}")
+
+            dave = Peer(binary, dave_profile)
+            peers.append(dave)
+            dave.event("ready")
+            carol.event(
+                "outbox_delivered", lambda event: event.get("count", 0) > 0, timeout=60
+            )
+
+            # Now the sender is the one who stays online and the recipient is gone
+            # for good: only a deposit can still reach her.
+            carol.close()
+            dave.send({"command": "send", "contact": "Carol", "message": "deposited while away"})
+            deposited = dave.event(
+                "message_sent",
+                lambda event: event.get("body") == "deposited while away",
+                timeout=60,
+            )
+            if deposited.get("delivery") != "mailbox":
+                raise RuntimeError(
+                    f"message for an offline contact never reached the mailbox: {deposited}"
+                )
+
+            carol = Peer(binary, carol_profile)
+            peers.append(carol)
+            carol.event("ready")
+            carol.event(
+                "message",
+                lambda event: event.get("body") == "deposited while away",
+                timeout=60,
+            )
+
+            # Clearing is the exact payload the desktop's "Quitar buzón" button sends.
+            carol.send({"command": "set_mailbox", "url": None})
+            cleared = carol.event("mailbox_configured", timeout=60)
+            if cleared.get("mailbox_url") is not None:
+                raise RuntimeError(f"mailbox was not cleared: {cleared}")
         finally:
             for peer in reversed(peers):
                 peer.close()
+            if node is not None:
+                node.close()
 
     print(
         "pptalk e2e smoke: symmetric contacts, direct files, cancellation, replies, "
-        "edits, calls, reconnect, MLS files, history sync, multi-device and revocation passed"
+        "edits, calls, reconnect, MLS files, history sync, multi-device, revocation "
+        "and mailbox store-and-forward passed"
     )
 
 
