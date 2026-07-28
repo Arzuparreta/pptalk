@@ -1185,7 +1185,10 @@ void AppController::startBackend()
 {
     const auto dataDirectory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(dataDirectory);
-    m_profilePath = dataDirectory + QStringLiteral("/profile.json");
+    m_profilePath = qEnvironmentVariable("PPTALK_PROFILE");
+    if (m_profilePath.isEmpty()) {
+        m_profilePath = dataDirectory + QStringLiteral("/profile.json");
+    }
     for (const auto &argument : QCoreApplication::arguments()) {
         if (argument.startsWith(QStringLiteral("pptalk://contact/"))) {
             m_startupInvite = argument;

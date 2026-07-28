@@ -87,13 +87,11 @@ jobs:
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
           $env:PPTALK_CLI = (Resolve-Path "target/debug/pptalk-cli.exe").Path
-          $env:APPDATA = Join-Path $env:RUNNER_TEMP "pptalk-desktop-appdata"
-          foreach ($RelativeDir in @("pptalk", "pptalk/pptalk")) {
-            $ProfileDir = Join-Path $env:APPDATA $RelativeDir
-            New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
-            & $env:PPTALK_CLI init --profile "$ProfileDir/profile.json" --name "CI Windows"
-            if ($LASTEXITCODE -ne 0) { throw "Could not create the desktop smoke profile" }
-          }
+          $ProfileDir = Join-Path $env:RUNNER_TEMP "pptalk-desktop-profile"
+          New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+          $env:PPTALK_PROFILE = Join-Path $ProfileDir "profile.json"
+          & $env:PPTALK_CLI init --profile $env:PPTALK_PROFILE --name "CI Windows"
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the desktop smoke profile" }
           $Process = Start-Process -PassThru -FilePath "build/desktop/pptalk-desktop.exe"
           Start-Sleep -Seconds 8
           if ($Process.HasExited) {

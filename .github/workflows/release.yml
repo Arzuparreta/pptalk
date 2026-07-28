@@ -95,14 +95,12 @@ jobs:
           & $Installer --root $InstallDir --accept-licenses --accept-obligations `
               --default-answer --confirm-command install
           if ($LASTEXITCODE -ne 0) { throw "The Windows installer failed" }
-          $env:APPDATA = Join-Path $env:RUNNER_TEMP "pptalk-installed-appdata"
-          foreach ($RelativeDir in @("pptalk", "pptalk/pptalk")) {
-            $ProfileDir = Join-Path $env:APPDATA $RelativeDir
-            New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
-            & "$InstallDir/pptalk-cli.exe" init `
-                --profile "$ProfileDir/profile.json" --name "CI Installed"
-            if ($LASTEXITCODE -ne 0) { throw "The installed CLI could not create a profile" }
-          }
+          $ProfileDir = Join-Path $env:RUNNER_TEMP "pptalk-installed-profile"
+          New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+          $env:PPTALK_PROFILE = Join-Path $ProfileDir "profile.json"
+          & "$InstallDir/pptalk-cli.exe" init `
+              --profile $env:PPTALK_PROFILE --name "CI Installed"
+          if ($LASTEXITCODE -ne 0) { throw "The installed CLI could not create a profile" }
           $Process = Start-Process -PassThru -FilePath "$InstallDir/pptalk-desktop.exe"
           Start-Sleep -Seconds 8
           if ($Process.HasExited) {
