@@ -89,12 +89,24 @@ jobs:
           & $Installer --root $InstallDir --accept-licenses --accept-obligations `
               --default-answer --confirm-command install
           if ($LASTEXITCODE -ne 0) { throw "The Windows installer failed" }
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP "pptalk-installed-appdata"
+          foreach ($RelativeDir in @("pptalk", "pptalk/pptalk")) {
+            $ProfileDir = Join-Path $env:APPDATA $RelativeDir
+            New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+            & "$InstallDir/pptalk-cli.exe" init `
+                --profile "$ProfileDir/profile.json" --name "CI Installed"
+            if ($LASTEXITCODE -ne 0) { throw "The installed CLI could not create a profile" }
+          }
           $Process = Start-Process -PassThru -FilePath "$InstallDir/pptalk-desktop.exe"
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 8
           if ($Process.HasExited) {
             throw "pptalk-desktop exited during the startup smoke test with code $($Process.ExitCode)"
           }
+          $Child = Get-CimInstance Win32_Process |
+              Where-Object { $_.ParentProcessId -eq $Process.Id -and $_.Name -eq "pptalk-cli.exe" }
+          if (-not $Child) { throw "The installed desktop did not start its local daemon" }
           Stop-Process -Id $Process.Id
+          $Child | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
       - uses: actions/upload-artifact@v4
         with:
           name: windows

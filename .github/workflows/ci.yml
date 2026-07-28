@@ -50,6 +50,9 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.*'
@@ -63,10 +66,35 @@ jobs:
           Start-Process -Wait -FilePath "$env:RUNNER_TEMP\gstreamer.exe" -ArgumentList '/VERYSILENT','/NORESTART','/CURRENTUSER','/TYPE=devel','/DIR=C:\gstreamer'
           "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer" | Out-File -Append -FilePath $env:GITHUB_ENV
           "C:\gstreamer\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
-      - run: cargo check -p pptalk-cli --locked
-      - run: >-
-          cargo test --locked
-          -p pptalk-cli -p pptalk-protocol -p pptalk-core
-          -p pptalk-mls -p pptalk-storage -p pptalk-network
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo build -p pptalk-cli -p pptalk-node --locked
+      - name: Run end-to-end smoke on Windows
+        run: >-
+          python scripts/smoke-e2e.py
+          --binary target/debug/pptalk-cli.exe
+          --node-binary target/debug/pptalk-node.exe
       - run: cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl
       - run: cmake --build build/desktop
+      - name: Smoke-test Qt desktop with its real daemon
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:PPTALK_CLI = (Resolve-Path "target/debug/pptalk-cli.exe").Path
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP "pptalk-desktop-appdata"
+          foreach ($RelativeDir in @("pptalk", "pptalk/pptalk")) {
+            $ProfileDir = Join-Path $env:APPDATA $RelativeDir
+            New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+            & $env:PPTALK_CLI init --profile "$ProfileDir/profile.json" --name "CI Windows"
+            if ($LASTEXITCODE -ne 0) { throw "Could not create the desktop smoke profile" }
+          }
+          $Process = Start-Process -PassThru -FilePath "build/desktop/pptalk-desktop.exe"
+          Start-Sleep -Seconds 8
+          if ($Process.HasExited) {
+            throw "pptalk-desktop exited during startup with code $($Process.ExitCode)"
+          }
+          $Child = Get-CimInstance Win32_Process |
+              Where-Object { $_.ParentProcessId -eq $Process.Id -and $_.Name -eq "pptalk-cli.exe" }
+          if (-not $Child) { throw "pptalk-desktop did not start its local daemon" }
+          Stop-Process -Id $Process.Id
+          $Child | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
