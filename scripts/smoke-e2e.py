@@ -70,16 +70,31 @@ class Peer:
         )
         self.events: queue.Queue[dict] = queue.Queue()
         self.pending: list[dict] = []
+        self.stderr_lines: list[str] = []
         self.reader = threading.Thread(target=self._read_events, daemon=True)
+        self.stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self.reader.start()
+        self.stderr_reader.start()
 
     def _read_events(self) -> None:
         assert self.process.stdout is not None
-        for line in self.process.stdout:
-            try:
-                self.events.put(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        try:
+            for line in self.process.stdout:
+                try:
+                    self.events.put(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except ValueError:
+            # The stream can be closed by cleanup after another peer fails.
+            pass
+
+    def _read_stderr(self) -> None:
+        assert self.process.stderr is not None
+        try:
+            for line in self.process.stderr:
+                self.stderr_lines.append(line.rstrip())
+        except ValueError:
+            pass
 
     def send(self, command: dict[str, object]) -> None:
         assert self.process.stdin is not None
@@ -94,27 +109,37 @@ class Peer:
         seen: list[str | None] = []
         while time.monotonic() < deadline:
             try:
-                value = self.events.get(timeout=max(0, deadline - time.monotonic()))
+                value = self.events.get(timeout=min(0.2, max(0, deadline - time.monotonic())))
             except queue.Empty:
-                break
+                return_code = self.process.poll()
+                if return_code is not None:
+                    self.reader.join(timeout=1)
+                    self.stderr_reader.join(timeout=1)
+                    stderr = "\n".join(self.stderr_lines)
+                    raise RuntimeError(
+                        f"daemon exited with code {return_code} while waiting for {name}; "
+                        f"seen={seen}; stderr={stderr}"
+                    )
+                continue
             seen.append(value.get("event"))
             if value.get("event") == name and predicate(value):
                 return value
             self.pending.append(value)
-        stderr = ""
-        if self.process.poll() is not None and self.process.stderr is not None:
-            stderr = self.process.stderr.read()
+        stderr = "\n".join(self.stderr_lines)
         raise RuntimeError(f"timeout waiting for {name}; seen={seen}; stderr={stderr}")
 
     def close(self) -> None:
         if self.process.poll() is None:
             try:
                 self.send({"command": "shutdown"})
-                self.process.communicate(timeout=8)
-                return
+                self.process.wait(timeout=8)
             except (BrokenPipeError, subprocess.TimeoutExpired):
                 self.process.kill()
-        self.process.communicate()
+                self.process.wait(timeout=8)
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        self.reader.join(timeout=1)
+        self.stderr_reader.join(timeout=1)
 
     def assert_no_event(self, name: str, predicate=lambda _event: True, duration: float = 4) -> None:
         for value in self.pending:

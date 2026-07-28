@@ -64,8 +64,14 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/1.28.5/msvc/gstreamer-1.0-msvc-x86_64-1.28.5.exe" -OutFile "$env:RUNNER_TEMP\gstreamer.exe"
           Start-Process -Wait -FilePath "$env:RUNNER_TEMP\gstreamer.exe" -ArgumentList '/VERYSILENT','/NORESTART','/CURRENTUSER','/TYPE=devel','/DIR=C:\gstreamer'
+          if (-not (Test-Path "C:\gstreamer\bin\gst-inspect-1.0.exe")) {
+            throw "GStreamer did not install in the requested directory"
+          }
           "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "PATH=C:\gstreamer\bin;$env:PATH" | Out-File -Append -FilePath $env:GITHUB_ENV
           "C:\gstreamer\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+          & "C:\gstreamer\bin\gst-inspect-1.0.exe" opusenc | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "GStreamer could not load the Opus encoder" }
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
       - run: cargo build -p pptalk-cli -p pptalk-node --locked
