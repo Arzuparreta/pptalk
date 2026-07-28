@@ -3,7 +3,6 @@ resolver = "3"
 members = [
   "apps/cli",
   "apps/node",
-  "crates/distributed",
   "crates/core",
   "crates/media",
   "crates/mls",
@@ -11,6 +10,7 @@ members = [
   "crates/protocol",
   "crates/storage",
 ]
+exclude = ["crates/distributed"]
 
 [workspace.package]
 version = "0.1.0"
@@ -55,7 +55,6 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
-veilid-core = { version = "0.5.7", default-features = false, features = ["default-tokio"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [workspace.lints.rust]

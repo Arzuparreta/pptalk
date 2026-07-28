@@ -4,32 +4,29 @@ Habla con tus amigos sin una cuenta central y sin entregar tus conversaciones a
 una empresa. pptalk es una aplicación nativa de escritorio para mensajes,
 archivos, grupos y llamadas cifradas entre los dispositivos de sus usuarios.
 
-> **Estado actual:** funciona como versión de desarrollo, pero todavía no es un
-> producto auditado ni tiene una entrega estable publicada. No lo uses aún si una
-> vulnerabilidad pudiera poner a alguien en peligro.
+> **Estado actual:** funciona como versión preliminar y todavía no es un producto
+> auditado. No lo uses aún si una vulnerabilidad pudiera poner a alguien en
+> peligro.
 
 ## Empezar
 
-Necesitas Linux, Rust 1.91+, CMake, Ninja, Qt 6.8+ y GStreamer 1.24+. La
-[guía de instalación](docs/installation.md) explica los requisitos y también el
-proceso para Windows.
+Descarga la AppImage para Linux x86_64 o el instalador para Windows x86_64 desde
+la [página de versiones](https://github.com/Arzuparreta/pptalk/releases). La
+[guía de instalación](docs/installation.md) explica ambos procesos y cómo
+compilar desde el código.
 
 ```sh
-git clone https://github.com/Arzuparreta/pptalk.git
-cd pptalk
-./scripts/dev.sh start
+chmod +x pptalk-*-linux-x86_64.AppImage
+./pptalk-*-linux-x86_64.AppImage
 ```
 
-La primera compilación puede tardar varios minutos. Al terminar se abrirá la
-aplicación: escribe cómo quieres que te vean tus amigos para crear una identidad
-local, o elige **Vincular equipo** o **Restaurar copia**. No hay registro ni
-correo electrónico.
+En la primera apertura, escribe cómo quieres que te vean tus amigos para crear
+una identidad local, o elige **Vincular equipo** o **Restaurar copia**. No hay
+registro ni correo electrónico.
 
-Para cerrar todo:
-
-```sh
-./scripts/dev.sh stop
-```
+En Windows, abre el `.exe` descargado y sigue el instalador. La primera apertura
+puede mostrar un aviso de Windows porque la versión preliminar aún no está
+firmada con un certificado comercial.
 
 ## Añadir a un amigo
 

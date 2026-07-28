@@ -16,7 +16,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: sudo apt-get update
-      - run: sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - run: >-
+          sudo apt-get install -y
+          libdbus-1-dev pkg-config
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -35,7 +38,13 @@ jobs:
           cache: true
       - run: cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build/desktop
-      - run: QT_QPA_PLATFORM=offscreen timeout 3s ./build/desktop/pptalk-desktop || test $? -eq 124
+      - name: Smoke-test desktop startup
+        run: |
+          set +e
+          QT_QPA_PLATFORM=offscreen timeout 3s ./build/desktop/pptalk-desktop
+          status="$?"
+          set -e
+          test "$status" -eq 124
 
   desktop-windows:
     runs-on: windows-2025
@@ -44,7 +53,9 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.*'
+          arch: win64_msvc2022_64
           cache: true
+      - uses: ilammy/msvc-dev-cmd@v1
       - name: Install GStreamer 1.28 SDK
         shell: pwsh
         run: |
@@ -53,19 +64,9 @@ jobs:
           "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer" | Out-File -Append -FilePath $env:GITHUB_ENV
           "C:\gstreamer\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
       - run: cargo check -p pptalk-cli --locked
-      - run: cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: >-
+          cargo test --locked
+          -p pptalk-cli -p pptalk-protocol -p pptalk-core
+          -p pptalk-mls -p pptalk-storage -p pptalk-network
+      - run: cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl
       - run: cmake --build build/desktop
-
-  linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev qt6-base-dev qt6-declarative-dev ninja-build
-      - run: cargo check --workspace --locked
-      - run: cargo test -p pptalk-protocol -p pptalk-core -p pptalk-mls -p pptalk-storage --locked
-      - run: cmake -S apps/desktop -B build/desktop-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release
-      - run: cmake --build build/desktop-arm64

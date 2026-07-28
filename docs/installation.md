@@ -1,9 +1,23 @@
 # Instalar y abrir pptalk
 
-pptalk aún se distribuye desde el código fuente. Esta guía deja la aplicación
-lista para probarla; no necesitas montar un servidor ni crear una cuenta.
+pptalk se publica como versión preliminar para Linux x86_64 y Windows x86_64.
+No necesitas montar un servidor ni crear una cuenta.
 
 ## Linux
+
+Descarga el archivo `pptalk-…-linux-x86_64.AppImage` de la
+[página de versiones](https://github.com/Arzuparreta/pptalk/releases), dale
+permiso de ejecución y ábrelo:
+
+```sh
+chmod +x pptalk-*-linux-x86_64.AppImage
+./pptalk-*-linux-x86_64.AppImage
+```
+
+En algunas distribuciones necesitas instalar `fuse2`. Si solo quieres usar la
+aplicación, no necesitas Rust, Qt ni GStreamer.
+
+### Compilar desde el código
 
 Instala estas herramientas con el gestor de paquetes de tu distribución:
 
@@ -41,6 +55,16 @@ Usa `./scripts/dev.sh restart` después de cambiar código y
 
 ## Windows
 
+Descarga `pptalk-…-windows-x86_64.exe` de la
+[página de versiones](https://github.com/Arzuparreta/pptalk/releases), abre el
+instalador y sigue sus pasos. Windows puede mostrar una advertencia porque esta
+versión preliminar aún no está firmada con un certificado comercial.
+
+El instalador incluye Qt, GStreamer y el servicio local: tu amigo no necesita
+instalar herramientas de desarrollo.
+
+### Compilar desde el código
+
 Necesitas Rust, CMake, Ninja, Qt 6.8+ y GStreamer 1.24+ disponibles en `PATH`.
 Desde PowerShell:
 
@@ -55,15 +79,13 @@ $env:PPTALK_CLI = (Resolve-Path target/debug/pptalk-cli.exe)
 Según el generador de CMake, el ejecutable puede quedar en una subcarpeta como
 `build/desktop/Debug/`.
 
-Las etiquetas de versión generan un instalador `.exe` para Windows y AppImage
-para Linux x86_64 y arm64. El paquete `pptalk-bin` de AUR usa la AppImage x86_64;
-hasta que exista una versión publicada, compila desde el repositorio.
+Las etiquetas de versión generan un instalador `.exe` para Windows y una
+AppImage para Linux, ambos x86_64. El paquete `pptalk-bin` de AUR usa esa
+AppImage.
 
 ## Comprobar la instalación
 
-```sh
-./scripts/dev.sh doctor
-```
+Si has compilado desde el código, ejecuta `./scripts/dev.sh doctor`.
 
 El diagnóstico debe mostrar transporte Iroh, base SQLCipher, multimedia
 GStreamer y escritorio Qt Quick. Para ver el estado y los logs:

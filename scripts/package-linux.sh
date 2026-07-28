@@ -34,7 +34,57 @@ install -Dm644 "${repo_root}/LICENSES/MPL-2.0.txt" \
   "${stage_dir}/usr/share/doc/pptalk/LICENSES/MPL-2.0.txt"
 gstreamer_plugins="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
 install -d "${stage_dir}/usr/lib/gstreamer-1.0"
-cp -a "${gstreamer_plugins}"/*.so "${stage_dir}/usr/lib/gstreamer-1.0/"
+command -v gst-inspect-1.0 >/dev/null || {
+  printf '%s\n' 'gst-inspect-1.0 is required' >&2
+  exit 1
+}
+copy_gstreamer_element() {
+  local element="$1"
+  local required="${2:-required}"
+  local plugin
+  plugin="$(
+    LC_ALL=C GST_PLUGIN_SYSTEM_PATH_1_0="${gstreamer_plugins}" \
+      gst-inspect-1.0 "${element}" 2>/dev/null |
+      sed -n 's/^[[:space:]]*Filename[[:space:]]*//p' |
+      head -n 1
+  )"
+  if [[ -z "${plugin}" || ! -f "${plugin}" ]]; then
+    if [[ "${required}" == required ]]; then
+      printf 'required GStreamer element is unavailable: %s\n' "${element}" >&2
+      exit 1
+    fi
+    return 1
+  fi
+  install -Dm755 "${plugin}" "${stage_dir}/usr/lib/gstreamer-1.0/$(basename "${plugin}")"
+}
+for element in \
+  appsrc appsink queue audioconvert audioresample opusenc opusdec \
+  rtpopuspay rtpopusdepay rtpjitterbuffer volume videoconvert videoscale \
+  videorate h264parse rtph264pay rtph264depay decodebin autoaudiosink \
+  autovideosink; do
+  copy_gstreamer_element "${element}"
+done
+copy_at_least_one() {
+  local description="$1"
+  shift
+  local found=0
+  local element
+  for element in "$@"; do
+    if copy_gstreamer_element "${element}" optional; then found=1; fi
+  done
+  if [[ "${found}" -eq 0 ]]; then
+    printf 'no supported GStreamer %s plugin is available\n' "${description}" >&2
+    exit 1
+  fi
+}
+copy_at_least_one "audio capture" pulsesrc pipewiresrc alsasrc
+copy_at_least_one "camera capture" v4l2src pipewiresrc
+copy_at_least_one "screen capture" pipewiresrc ximagesrc
+copy_at_least_one "H.264 encoder" openh264enc x264enc
+copy_at_least_one "H.264 decoder" openh264dec avdec_h264
+for element in pulsesink pipewiresink alsasink waylandsink ximagesink xvimagesink; do
+  copy_gstreamer_element "${element}" optional || true
+done
 gstreamer_scanner="$(pkg-config --variable=pluginscannerdir gstreamer-1.0)/gst-plugin-scanner"
 install -Dm755 "${gstreamer_scanner}" \
   "${stage_dir}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"

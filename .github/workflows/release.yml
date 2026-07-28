@@ -9,14 +9,7 @@ permissions:
 
 jobs:
   linux:
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,31 +20,42 @@ jobs:
       - run: sudo apt-get update
       - run: >-
           sudo apt-get install -y
+          libdbus-1-dev pkg-config
           libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           gstreamer1.0-plugins-base gstreamer1.0-plugins-good
           gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-          gstreamer1.0-libav gstreamer1.0-pulseaudio
+          gstreamer1.0-libav gstreamer1.0-pulseaudio gstreamer1.0-tools
       - name: Install AppImage tools
         shell: bash
         run: |
-          case '${{ matrix.arch }}' in
-            x86_64) appimage_arch=x86_64 ;;
-            arm64) appimage_arch=aarch64 ;;
-          esac
-          curl -fL "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${appimage_arch}.AppImage" -o "$RUNNER_TEMP/linuxdeploy"
-          curl -fL "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${appimage_arch}.AppImage" -o "$RUNNER_TEMP/linuxdeploy-plugin-qt"
+          curl -fL "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" -o "$RUNNER_TEMP/linuxdeploy"
+          curl -fL "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" -o "$RUNNER_TEMP/linuxdeploy-plugin-qt"
           chmod +x "$RUNNER_TEMP/linuxdeploy" "$RUNNER_TEMP/linuxdeploy-plugin-qt"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}"
         env:
-          PPTALK_ARTIFACT_ARCH: ${{ matrix.arch }}
+          PPTALK_ARTIFACT_ARCH: x86_64
           APPIMAGE_EXTRACT_AND_RUN: '1'
+      - name: Smoke-test AppImage
+        shell: bash
+        run: |
+          artifact="build/pptalk-${GITHUB_REF_NAME}-linux-x86_64.AppImage"
+          chmod +x "$artifact"
+          "$artifact" --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/pptalk-desktop
+          test -x squashfs-root/usr/bin/pptalk-cli
+          set +e
+          QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 timeout 5s "$artifact"
+          status="$?"
+          set -e
+          test "$status" -eq 124
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.arch }}
+          name: linux-x86_64
           path: |
             build/*.AppImage
             build/*.AppImage.zsync
+          if-no-files-found: error
 
   windows:
     runs-on: windows-2025
@@ -61,8 +65,10 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.*'
+          arch: win64_msvc2022_64
           cache: true
           tools: tools_ifw
+      - uses: ilammy/msvc-dev-cmd@v1
       - name: Install GStreamer 1.28 SDK
         shell: pwsh
         run: |
@@ -72,10 +78,28 @@ jobs:
           "C:\gstreamer\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
       - shell: pwsh
         run: ./scripts/package-windows.ps1 -Version $env:GITHUB_REF_NAME
+      - name: Smoke-test Windows installer and installed application
+        shell: pwsh
+        run: |
+          $StageDir = "build/package-windows/pptalk"
+          & "$StageDir/pptalk-cli.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "The staged CLI did not start" }
+          $Installer = (Get-Item "build/pptalk-*-windows-x86_64.exe").FullName
+          $InstallDir = Join-Path $env:RUNNER_TEMP "pptalk-installed"
+          & $Installer --root $InstallDir --accept-licenses --accept-obligations `
+              --default-answer --confirm-command install
+          if ($LASTEXITCODE -ne 0) { throw "The Windows installer failed" }
+          $Process = Start-Process -PassThru -FilePath "$InstallDir/pptalk-desktop.exe"
+          Start-Sleep -Seconds 5
+          if ($Process.HasExited) {
+            throw "pptalk-desktop exited during the startup smoke test with code $($Process.ExitCode)"
+          }
+          Stop-Process -Id $Process.Id
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: build/*.exe
+          if-no-files-found: error
 
   publish:
     needs: [linux, windows]
@@ -85,6 +109,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Create checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

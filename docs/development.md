@@ -89,6 +89,8 @@ ambos lados.
 - `crates/storage`: SQLCipher y outbox.
 - `crates/media`: captura y política multimedia GStreamer.
 - `crates/protocol`: tipos CBOR versionados.
-- `crates/distributed`: spike Veilid aislado de la ruta de producción.
+- `crates/distributed`: spike Veilid aislado de la ruta de producción y del
+  workspace distribuido. Veilid 0.5.7 arrastra avisos de seguridad sin solución;
+  no lo compiles ni lo empaquetes como parte del cliente.
 
 Las reglas internas para agentes y mantenedores están en [AGENTS.md](../AGENTS.md).

@@ -1224,6 +1224,16 @@ void AppController::launchBackend()
 {
     if (m_backend != nullptr) return;
     m_backend = new QProcess(this);
+#ifdef Q_OS_WIN
+    auto environment = QProcessEnvironment::systemEnvironment();
+    const auto applicationDir = QCoreApplication::applicationDirPath();
+    environment.insert(QStringLiteral("GST_PLUGIN_SYSTEM_PATH_1_0"),
+                       applicationDir + QStringLiteral("/lib/gstreamer-1.0"));
+    environment.insert(QStringLiteral("GST_PLUGIN_SCANNER"),
+                       applicationDir +
+                           QStringLiteral("/libexec/gstreamer-1.0/gst-plugin-scanner.exe"));
+    m_backend->setProcessEnvironment(environment);
+#endif
     m_backend->setProcessChannelMode(QProcess::SeparateChannels);
     connect(m_backend, &QProcess::readyReadStandardOutput, this,
             &AppController::processBackendOutput);
