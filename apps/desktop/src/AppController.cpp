@@ -1227,11 +1227,17 @@ void AppController::launchBackend()
 #ifdef Q_OS_WIN
     auto environment = QProcessEnvironment::systemEnvironment();
     const auto applicationDir = QCoreApplication::applicationDirPath();
-    environment.insert(QStringLiteral("GST_PLUGIN_SYSTEM_PATH_1_0"),
-                       applicationDir + QStringLiteral("/lib/gstreamer-1.0"));
-    environment.insert(QStringLiteral("GST_PLUGIN_SCANNER"),
-                       applicationDir +
-                           QStringLiteral("/libexec/gstreamer-1.0/gst-plugin-scanner.exe"));
+    const auto bundledPluginDirectory =
+        applicationDir + QStringLiteral("/lib/gstreamer-1.0");
+    const auto bundledPluginScanner =
+        applicationDir + QStringLiteral("/libexec/gstreamer-1.0/gst-plugin-scanner.exe");
+    if (QDir(bundledPluginDirectory).exists()) {
+        environment.insert(QStringLiteral("GST_PLUGIN_SYSTEM_PATH_1_0"),
+                           bundledPluginDirectory);
+    }
+    if (QFileInfo::exists(bundledPluginScanner)) {
+        environment.insert(QStringLiteral("GST_PLUGIN_SCANNER"), bundledPluginScanner);
+    }
     m_backend->setProcessEnvironment(environment);
 #endif
     m_backend->setProcessChannelMode(QProcess::SeparateChannels);
