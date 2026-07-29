@@ -1,4 +1,12 @@
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayUrl, SecretKey, TransportAddr,
@@ -6,7 +14,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use pptalk_protocol::MAX_ENVELOPE_BYTES;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 const INTERACTIVE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -62,6 +70,7 @@ pub struct IncomingMediaDatagram {
 #[derive(Debug, Clone)]
 pub struct MediaSession {
     connection: Connection,
+    remote_endpoint_id: String,
 }
 
 impl MediaSession {
@@ -74,6 +83,10 @@ impl MediaSession {
 
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.connection.max_datagram_size()
+    }
+
+    pub fn remote_endpoint_id(&self) -> &str {
+        &self.remote_endpoint_id
     }
 }
 
@@ -97,6 +110,7 @@ pub struct PeerNetwork {
     incoming: Arc<Mutex<mpsc::Receiver<IncomingEnvelope>>>,
     calls: Arc<Mutex<mpsc::Receiver<IncomingEnvelope>>>,
     media: Arc<Mutex<mpsc::Receiver<IncomingMediaDatagram>>>,
+    media_sessions: Arc<MediaSessionRegistry>,
 }
 
 impl PeerNetwork {
@@ -131,6 +145,10 @@ impl PeerNetwork {
         let (sender, receiver) = mpsc::channel(256);
         let (call_sender, call_receiver) = mpsc::channel(64);
         let (media_sender, media_receiver) = mpsc::channel(1024);
+        let media_sessions = Arc::new(MediaSessionRegistry::new(
+            endpoint.id().to_string(),
+            media_sender,
+        ));
         let router = Router::builder(endpoint)
             .accept(pptalk_protocol::SYNC_ALPN, EnvelopeHandler { sender })
             .accept(
@@ -142,7 +160,7 @@ impl PeerNetwork {
             .accept(
                 pptalk_protocol::MEDIA_ALPN,
                 MediaDatagramHandler {
-                    sender: media_sender,
+                    sessions: Arc::clone(&media_sessions),
                 },
             )
             .spawn();
@@ -151,6 +169,7 @@ impl PeerNetwork {
             incoming: Arc::new(Mutex::new(receiver)),
             calls: Arc::new(Mutex::new(call_receiver)),
             media: Arc::new(Mutex::new(media_receiver)),
+            media_sessions,
         }
     }
 
@@ -229,6 +248,33 @@ impl PeerNetwork {
     }
 
     pub async fn connect_media(&self, peer: &PeerAddress) -> Result<MediaSession, NetworkError> {
+        if let Some(session) = self.media_sessions.get(&peer.endpoint_id).await {
+            return Ok(session);
+        }
+
+        // Both peers enabling a microphone at the same time used to create two unrelated
+        // one-way QUIC connections. Only the accepting side installed a datagram reader,
+        // so the usable direction depended on who won the call setup race. Pick one
+        // canonical dialer per endpoint pair and make the resulting connection duplex.
+        let local_endpoint_id = self.local_address().endpoint_id;
+        if local_endpoint_id.as_str() < peer.endpoint_id.as_str() {
+            return self.dial_media(peer).await;
+        }
+
+        if let Ok(session) = self
+            .media_sessions
+            .wait_for(&peer.endpoint_id, INTERACTIVE_CONNECT_TIMEOUT)
+            .await
+        {
+            return Ok(session);
+        }
+
+        // A bounded fallback keeps media available if the canonical peer is an older
+        // client or its incoming connection was lost during path establishment.
+        self.dial_media(peer).await
+    }
+
+    async fn dial_media(&self, peer: &PeerAddress) -> Result<MediaSession, NetworkError> {
         let connection = tokio::time::timeout(
             INTERACTIVE_CONNECT_TIMEOUT,
             self.router
@@ -238,7 +284,11 @@ impl PeerNetwork {
         .await
         .map_err(|_| NetworkError::Transport("media connection timed out".into()))?
         .map_err(|error| NetworkError::Transport(error.to_string()))?;
-        Ok(MediaSession { connection })
+        Ok(self.media_sessions.register(connection).await)
+    }
+
+    pub async fn close_media(&self, remote_endpoint_id: &str) {
+        self.media_sessions.close(remote_endpoint_id).await;
     }
 
     pub async fn receive_media(&self) -> Result<IncomingMediaDatagram, NetworkError> {
@@ -265,26 +315,141 @@ struct EnvelopeHandler {
 
 #[derive(Debug, Clone)]
 struct MediaDatagramHandler {
-    sender: mpsc::Sender<IncomingMediaDatagram>,
+    sessions: Arc<MediaSessionRegistry>,
 }
 
 impl ProtocolHandler for MediaDatagramHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let remote_endpoint_id = connection.remote_id().to_string();
-        while let Ok(bytes) = connection.read_datagram().await {
-            if self
-                .sender
-                .send(IncomingMediaDatagram {
-                    remote_endpoint_id: remote_endpoint_id.clone(),
-                    bytes: bytes.into(),
-                })
+        self.sessions.register(connection).await;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RegisteredMediaSession {
+    generation: u64,
+    connection: Connection,
+}
+
+#[derive(Debug)]
+struct MediaSessionRegistry {
+    local_endpoint_id: String,
+    sessions: Mutex<HashMap<String, RegisteredMediaSession>>,
+    incoming: mpsc::Sender<IncomingMediaDatagram>,
+    changed: Notify,
+    next_generation: AtomicU64,
+}
+
+impl MediaSessionRegistry {
+    fn new(local_endpoint_id: String, incoming: mpsc::Sender<IncomingMediaDatagram>) -> Self {
+        Self {
+            local_endpoint_id,
+            sessions: Mutex::new(HashMap::new()),
+            incoming,
+            changed: Notify::new(),
+            next_generation: AtomicU64::new(1),
+        }
+    }
+
+    async fn get(&self, remote_endpoint_id: &str) -> Option<MediaSession> {
+        self.sessions
+            .lock()
+            .await
+            .get(remote_endpoint_id)
+            .map(|registered| MediaSession {
+                connection: registered.connection.clone(),
+                remote_endpoint_id: remote_endpoint_id.to_owned(),
+            })
+    }
+
+    async fn wait_for(
+        &self,
+        remote_endpoint_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<MediaSession, NetworkError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(session) = self.get(remote_endpoint_id).await {
+                return Ok(session);
+            }
+            tokio::time::timeout_at(deadline, notified)
                 .await
-                .is_err()
-            {
-                break;
+                .map_err(|_| NetworkError::Transport("media connection timed out".into()))?;
+        }
+    }
+
+    async fn register(self: &Arc<Self>, connection: Connection) -> MediaSession {
+        let remote_endpoint_id = connection.remote_id().to_string();
+        let canonical_is_client = self.local_endpoint_id.as_str() < remote_endpoint_id.as_str();
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let mut sessions = self.sessions.lock().await;
+        if let Some(existing) = sessions.get(&remote_endpoint_id) {
+            let existing_is_canonical =
+                existing.connection.side().is_client() == canonical_is_client;
+            if existing_is_canonical {
+                connection.close(0_u32.into(), b"duplicate");
+                return MediaSession {
+                    connection: existing.connection.clone(),
+                    remote_endpoint_id,
+                };
             }
         }
-        Ok(())
+        let previous = sessions.insert(
+            remote_endpoint_id.clone(),
+            RegisteredMediaSession {
+                generation,
+                connection: connection.clone(),
+            },
+        );
+        drop(sessions);
+        if let Some(previous) = previous {
+            previous.connection.close(0_u32.into(), b"replaced");
+        }
+        self.changed.notify_waiters();
+
+        let registry = Arc::clone(self);
+        let reader = connection.clone();
+        let reader_remote = remote_endpoint_id.clone();
+        tokio::spawn(async move {
+            while let Ok(bytes) = reader.read_datagram().await {
+                if registry
+                    .incoming
+                    .send(IncomingMediaDatagram {
+                        remote_endpoint_id: reader_remote.clone(),
+                        bytes: bytes.into(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            registry.remove_if_current(&reader_remote, generation).await;
+        });
+
+        MediaSession {
+            connection,
+            remote_endpoint_id,
+        }
+    }
+
+    async fn remove_if_current(&self, remote_endpoint_id: &str, generation: u64) {
+        let mut sessions = self.sessions.lock().await;
+        if sessions
+            .get(remote_endpoint_id)
+            .is_some_and(|registered| registered.generation == generation)
+        {
+            sessions.remove(remote_endpoint_id);
+        }
+    }
+
+    async fn close(&self, remote_endpoint_id: &str) {
+        if let Some(session) = self.sessions.lock().await.remove(remote_endpoint_id) {
+            session.connection.close(0_u32.into(), b"call complete");
+        }
     }
 }
 
@@ -357,20 +522,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_datagrams_cross_a_latency_sensitive_channel() {
+    async fn media_datagrams_are_duplex_regardless_of_connect_order() {
+        async fn exercise(reverse_connect_order: bool) {
+            let alice = PeerNetwork::start_direct().await.expect("alice");
+            let bob = PeerNetwork::start_direct().await.expect("bob");
+            let alice_address = alice.local_address();
+            let bob_address = bob.local_address();
+
+            let (alice_session, bob_session) = if reverse_connect_order {
+                let pending = tokio::spawn({
+                    let bob = bob.clone();
+                    let alice_address = alice_address.clone();
+                    async move { bob.connect_media(&alice_address).await }
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let alice_session = alice
+                    .connect_media(&bob_address)
+                    .await
+                    .expect("alice media session");
+                let bob_session = pending
+                    .await
+                    .expect("bob media task")
+                    .expect("bob media session");
+                (alice_session, bob_session)
+            } else {
+                let pending = tokio::spawn({
+                    let alice = alice.clone();
+                    let bob_address = bob_address.clone();
+                    async move { alice.connect_media(&bob_address).await }
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let bob_session = bob
+                    .connect_media(&alice_address)
+                    .await
+                    .expect("bob media session");
+                let alice_session = pending
+                    .await
+                    .expect("alice media task")
+                    .expect("alice media session");
+                (alice_session, bob_session)
+            };
+
+            assert_eq!(alice_session.remote_endpoint_id(), bob_address.endpoint_id);
+            assert_eq!(bob_session.remote_endpoint_id(), alice_address.endpoint_id);
+            alice_session
+                .send(vec![0x80, 0x60, 1, 2, 3])
+                .await
+                .expect("alice datagram");
+            bob_session
+                .send(vec![0x80, 0x60, 9, 8, 7])
+                .await
+                .expect("bob datagram");
+
+            let (at_alice, at_bob) = tokio::join!(alice.receive_media(), bob.receive_media());
+            let at_alice = at_alice.expect("alice receives bob");
+            let at_bob = at_bob.expect("bob receives alice");
+            assert_eq!(at_alice.bytes, vec![0x80, 0x60, 9, 8, 7]);
+            assert_eq!(at_alice.remote_endpoint_id, bob_address.endpoint_id);
+            assert_eq!(at_bob.bytes, vec![0x80, 0x60, 1, 2, 3]);
+            assert_eq!(at_bob.remote_endpoint_id, alice_address.endpoint_id);
+
+            alice.close_media(&bob_address.endpoint_id).await;
+            bob.close_media(&alice_address.endpoint_id).await;
+            alice.shutdown().await.expect("alice shutdown");
+            bob.shutdown().await.expect("bob shutdown");
+        }
+
+        exercise(false).await;
+        exercise(true).await;
+    }
+
+    #[tokio::test]
+    async fn media_connection_can_be_reestablished_after_close() {
         let alice = PeerNetwork::start_direct().await.expect("alice");
         let bob = PeerNetwork::start_direct().await.expect("bob");
-        let session = alice
-            .connect_media(&bob.local_address())
-            .await
-            .expect("media session");
-        session
+        let alice_address = alice.local_address();
+        let bob_address = bob.local_address();
+
+        let (first_alice, first_bob) = tokio::join!(
+            alice.connect_media(&bob_address),
+            bob.connect_media(&alice_address)
+        );
+        first_alice.expect("first alice session");
+        first_bob.expect("first bob session");
+        alice.close_media(&bob_address.endpoint_id).await;
+        bob.close_media(&alice_address.endpoint_id).await;
+
+        let (second_alice, second_bob) = tokio::join!(
+            alice.connect_media(&bob_address),
+            bob.connect_media(&alice_address)
+        );
+        let second_alice = second_alice.expect("second alice session");
+        let second_bob = second_bob.expect("second bob session");
+        second_alice
             .send(vec![0x80, 0x60, 1, 2, 3])
             .await
             .expect("datagram");
-        let packet = bob.receive_media().await.expect("media packet");
-        assert_eq!(packet.bytes, vec![0x80, 0x60, 1, 2, 3]);
-        assert_eq!(packet.remote_endpoint_id, alice.local_address().endpoint_id);
+        second_bob
+            .send(vec![0x80, 0x60, 4, 5, 6])
+            .await
+            .expect("return datagram");
+        let (at_alice, at_bob) = tokio::join!(alice.receive_media(), bob.receive_media());
+        assert_eq!(
+            at_alice.expect("alice packet").bytes,
+            vec![0x80, 0x60, 4, 5, 6]
+        );
+        assert_eq!(at_bob.expect("bob packet").bytes, vec![0x80, 0x60, 1, 2, 3]);
 
         alice.shutdown().await.expect("alice shutdown");
         bob.shutdown().await.expect("bob shutdown");

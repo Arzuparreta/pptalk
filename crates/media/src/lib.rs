@@ -785,4 +785,91 @@ mod tests {
         assert!(buffer.push(packet(1)).is_empty());
         assert_eq!(buffer.dropped(), 1);
     }
+
+    #[test]
+    fn opus_rtp_voice_roundtrips_without_audio_hardware() {
+        gst::init().expect("GStreamer");
+        let missing = [
+            "audiotestsrc",
+            "opusenc",
+            "rtpopuspay",
+            "appsrc",
+            "rtpjitterbuffer",
+            "rtpopusdepay",
+            "opusdec",
+            "appsink",
+        ]
+        .into_iter()
+        .filter(|element| !GstMediaEngine::has(element))
+        .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            eprintln!(
+                "skipping synthetic voice roundtrip; missing GStreamer elements: {missing:?}"
+            );
+            return;
+        }
+
+        let capture = gst::parse::launch(
+            "audiotestsrc num-buffers=30 samplesperbuffer=960 wave=sine freq=440 \
+             ! audio/x-raw,format=S16LE,rate=48000,channels=1 \
+             ! opusenc bitrate=64000 ! rtpopuspay pt=111 mtu=1100 \
+             ! appsink name=encoded sync=false",
+        )
+        .expect("synthetic capture")
+        .downcast::<gst::Pipeline>()
+        .expect("capture pipeline");
+        let encoded = capture
+            .by_name("encoded")
+            .expect("encoded sink")
+            .downcast::<gst_app::AppSink>()
+            .expect("appsink");
+
+        let playback = gst::parse::launch(
+            "appsrc name=rtp_source is-live=true format=time do-timestamp=true \
+             caps=\"application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000\" \
+             ! rtpjitterbuffer latency=20 ! rtpopusdepay ! opusdec \
+             ! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 \
+             ! appsink name=decoded sync=false",
+        )
+        .expect("synthetic playback")
+        .downcast::<gst::Pipeline>()
+        .expect("playback pipeline");
+        let source = playback
+            .by_name("rtp_source")
+            .expect("RTP source")
+            .downcast::<gst_app::AppSrc>()
+            .expect("appsrc");
+        let decoded = playback
+            .by_name("decoded")
+            .expect("decoded sink")
+            .downcast::<gst_app::AppSink>()
+            .expect("appsink");
+
+        playback.set_state(gst::State::Playing).expect("playback");
+        capture.set_state(gst::State::Playing).expect("capture");
+        for _ in 0..30 {
+            let sample = encoded
+                .try_pull_sample(gst::ClockTime::from_seconds(2))
+                .expect("encoded RTP packet");
+            let buffer = sample.buffer().expect("encoded buffer");
+            let bytes = buffer.map_readable().expect("readable RTP");
+            source
+                .push_buffer(gst::Buffer::from_slice(bytes.as_slice().to_vec()))
+                .expect("push RTP");
+        }
+        source.end_of_stream().expect("RTP end");
+
+        let sample = decoded
+            .try_pull_sample(gst::ClockTime::from_seconds(2))
+            .expect("decoded voice");
+        let buffer = sample.buffer().expect("decoded buffer");
+        let audio = buffer.map_readable().expect("readable PCM");
+        assert!(
+            audio.as_slice().iter().any(|sample| *sample != 0),
+            "decoded voice must not be silent"
+        );
+
+        capture.set_state(gst::State::Null).expect("stop capture");
+        playback.set_state(gst::State::Null).expect("stop playback");
+    }
 }

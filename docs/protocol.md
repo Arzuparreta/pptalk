@@ -57,6 +57,12 @@ Las señales viajan separadas de los datagramas multimedia. Una llamada de grupo
 replica el stream codificado a los peers de una malla. Hay variantes reservadas
 para SDP/ICE y ofertas de router, pero la versión actual no anuncia un SFU.
 
+Para cada pareja de endpoints, el menor ID abre una única conexión
+`pptalk/media/1`; el otro la acepta. La conexión es dúplex y ambos extremos
+mantienen un lector de datagramas. Cada datagrama declara `call_id`, dispositivo
+emisor, tipo de medio y secuencia; el receptor los contrasta con el endpoint
+QUIC autenticado y con los participantes de la llamada antes de reproducirlos.
+
 ## Buzón legado y spike distribuido
 
 El acceso es por capacidad. La ruta contiene un token aleatorio de 32 bytes en

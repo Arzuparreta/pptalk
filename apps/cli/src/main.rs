@@ -29,7 +29,7 @@ use pptalk_core::{
 };
 use pptalk_media::{GstMediaEngine, MediaDeviceKind, MediaEngine};
 use pptalk_mls::{MlsClient, MlsError};
-use pptalk_network::{PeerAddress, PeerNetwork};
+use pptalk_network::{MediaSession, PeerAddress, PeerNetwork};
 use pptalk_protocol::{
     BlobManifest, CallId, CallSignal, CausalFrontier, ContactInvite, ConversationEvent,
     ConversationId, DeviceId, EventBody, EventId, IdentityId, MediaDatagram, MediaKind,
@@ -407,6 +407,11 @@ struct ActiveCall {
     recipients: Vec<Contact>,
     started_at_unix: i64,
     connected_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug)]
+enum MediaTaskEvent {
+    Failed { kind: MediaKind, message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -949,6 +954,45 @@ async fn listen(path: &Path) -> Result<()> {
     Ok(())
 }
 
+async fn deliver_media_datagram(
+    network: &PeerNetwork,
+    routes: &mut [(PeerAddress, MediaSession)],
+    bytes: &[u8],
+) -> bool {
+    let mut delivered = false;
+    for (address, session) in routes {
+        if session.send(bytes.to_vec()).await.is_ok() {
+            delivered = true;
+            continue;
+        }
+
+        network.close_media(&address.endpoint_id).await;
+        let mut recovered = None;
+        for delay in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_secs(1),
+        ] {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let Ok(candidate) = network.connect_media(address).await else {
+                continue;
+            };
+            if candidate.send(bytes.to_vec()).await.is_ok() {
+                recovered = Some(candidate);
+                break;
+            }
+            network.close_media(&address.endpoint_id).await;
+        }
+        if let Some(recovered) = recovered {
+            *session = recovered;
+            delivered = true;
+        }
+    }
+    delivered
+}
+
 #[allow(clippy::needless_continue)]
 async fn daemon(path: &Path) -> Result<()> {
     let mut profile = load_profile(path)?;
@@ -962,6 +1006,8 @@ async fn daemon(path: &Path) -> Result<()> {
     let mut active_call: Option<ActiveCall> = None;
     let mut held_call: Option<ActiveCall> = None;
     let mut media_tasks: Vec<(MediaKind, tokio::task::JoinHandle<()>)> = Vec::new();
+    let (media_task_sender, mut media_task_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<MediaTaskEvent>();
     let (transfer_done_sender, mut transfer_done_receiver) =
         tokio::sync::mpsc::unbounded_channel::<String>();
     let mut transfer_tasks = std::collections::BTreeMap::<
@@ -2167,6 +2213,9 @@ async fn daemon(path: &Path) -> Result<()> {
                                 media.unpublish(kind).await.ok();
                                 media.stop_receiving(kind).await.ok();
                             }
+                            for recipient in &previous.recipients {
+                                network.close_media(&recipient.address.endpoint_id).await;
+                            }
                             emit_json(&serde_json::json!({"event":"call_held", "call_id":previous.id.to_string(), "contact":previous.label}))?;
                             held_call = Some(previous);
                         }
@@ -2244,6 +2293,9 @@ async fn daemon(path: &Path) -> Result<()> {
                             media.unpublish(kind).await.ok();
                             media.stop_receiving(kind).await.ok();
                         }
+                        for recipient in &recipients {
+                            network.close_media(&recipient.address.endpoint_id).await;
+                        }
                         if active_call.as_ref().is_some_and(|call| call.id == call_id) {
                             let ended = active_call.take().expect("active call was checked");
                             store.save_call_event(&CallEventRecord {
@@ -2284,11 +2336,16 @@ async fn daemon(path: &Path) -> Result<()> {
                                         let (_, task) = media_tasks.swap_remove(index);
                                         task.abort();
                                     }
-                                    let mut sessions = Vec::new();
+                                    let mut routes = Vec::new();
                                     for recipient in &recipients {
-                                        sessions.push(daemon_or_continue!(network.connect_media(&recipient.address).await));
+                                        routes.push((
+                                            recipient.address.clone(),
+                                            daemon_or_continue!(network.connect_media(&recipient.address).await),
+                                        ));
                                     }
                                     let media_for_task = Arc::clone(&media);
+                                    let network_for_task = network.clone();
+                                    let task_events = media_task_sender.clone();
                                     let sender = key.device_id();
                                     let task = tokio::spawn(async move {
                                         let started = std::time::Instant::now();
@@ -2298,16 +2355,29 @@ async fn daemon(path: &Path) -> Result<()> {
                                                 Ok(Some(payload)) => {
                                                     let timestamp = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
                                                     let packet = MediaDatagram::new(call_id, sender, kind, sequence, timestamp, false, payload);
-                                                    let Ok(bytes) = packet.to_wire() else { break; };
-                                                    let mut delivered = false;
-                                                    for session in &sessions {
-                                                        delivered |= session.send(bytes.clone()).await.is_ok();
+                                                    let Ok(bytes) = packet.to_wire() else {
+                                                        task_events.send(MediaTaskEvent::Failed {
+                                                            kind, message: "could not encode media datagram".into(),
+                                                        }).ok();
+                                                        break;
+                                                    };
+                                                    if !deliver_media_datagram(
+                                                        &network_for_task, &mut routes, &bytes,
+                                                    ).await {
+                                                        task_events.send(MediaTaskEvent::Failed {
+                                                            kind, message: "all media routes failed after reconnecting".into(),
+                                                        }).ok();
+                                                        break;
                                                     }
-                                                    if !delivered { break; }
                                                     sequence = sequence.saturating_add(1);
                                                 }
                                                 Ok(None) => {}
-                                                Err(_) => break,
+                                                Err(error) => {
+                                                    task_events.send(MediaTaskEvent::Failed {
+                                                        kind, message: error.to_string(),
+                                                    }).ok();
+                                                    break;
+                                                }
                                             }
                                         }
                                     });
@@ -2366,6 +2436,21 @@ async fn daemon(path: &Path) -> Result<()> {
                 {
                     tracing::warn!(%error, transfer_id = %completed, "file transfer task failed");
                 }
+            }
+            Some(event) = media_task_receiver.recv() => {
+                let MediaTaskEvent::Failed { kind, message } = event;
+                if let Some(index) = media_tasks.iter().position(|(active, _)| *active == kind) {
+                    let (_, task) = media_tasks.swap_remove(index);
+                    task.abort();
+                }
+                media.unpublish(kind).await.ok();
+                emit_json(&serde_json::json!({
+                    "event":"media_changed", "kind":kind, "enabled":false
+                }))?;
+                emit_json(&serde_json::json!({
+                    "event":"error",
+                    "message":format!("media stream failed after reconnecting: {message}")
+                }))?;
             }
             incoming = network.receive() => {
                 let incoming = incoming?;
@@ -2561,6 +2646,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             call.recipients.retain(|recipient| recipient.address.endpoint_id != remote_endpoint);
                             ended = call.recipients.is_empty();
                         }
+                        network.close_media(&remote_endpoint).await;
                         if ended {
                             for (_, task) in media_tasks.drain(..) { task.abort(); }
                             for kind in [MediaKind::Voice, MediaKind::Camera, MediaKind::Screen, MediaKind::SystemAudio] {
@@ -2589,17 +2675,20 @@ async fn daemon(path: &Path) -> Result<()> {
             incoming = network.receive_media() => {
                 let incoming = incoming?;
                 let packet = MediaDatagram::from_wire(&incoming.bytes)?;
-                let known_sender = profile.contacts.iter().any(|contact| {
+                let Some(call) = active_call.as_ref().filter(|call| call.id == packet.call_id) else {
+                    continue;
+                };
+                let known_sender = call.recipients.iter().any(|contact| {
                     !contact.blocked
                         && !contact.removed
                         && contact.address.endpoint_id == incoming.remote_endpoint_id
                         && contact.device_id == packet.sender
                 });
-                if packet.version != PROTOCOL_VERSION || !known_sender {
+                if packet.version != PROTOCOL_VERSION
+                    || packet.sender == key.device_id()
+                    || !known_sender
+                {
                     emit_json(&serde_json::json!({"event":"rejected", "message":"unauthorized media datagram"}))?;
-                    continue;
-                }
-                if active_call.as_ref().is_none_or(|call| call.id != packet.call_id) {
                     continue;
                 }
                 if let Err(error) = media

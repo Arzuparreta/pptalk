@@ -117,7 +117,10 @@ contacto. El relay/NAT traversal en vivo lo proporciona Iroh.
 
 GStreamer realiza captura, codificación y reproducción nativas. El audio, vídeo
 y pantalla viajan como RTP sobre canales de transporte separados de los
-mensajes.
+mensajes. Cada pareja de dispositivos mantiene una única conexión QUIC
+multimedia dúplex durante la llamada. El orden estable de sus IDs decide qué
+extremo la abre; ambos extremos leen y escriben datagramas sobre esa misma
+conexión y la cierran al salir.
 
 Las llamadas de grupo usan una malla entre participantes y tienen un límite duro
 de ocho personas. Cada emisor remoto tiene un pipeline de recepción propio, lo
