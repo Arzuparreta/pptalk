@@ -23,6 +23,7 @@ class AppController final : public QObject
     Q_PROPERTY(QString profileName READ profileName NOTIFY profileChanged)
     Q_PROPERTY(QString profileAvatar READ profileAvatar NOTIFY profileChanged)
     Q_PROPERTY(QString conversationName READ conversationName NOTIFY conversationChanged)
+    Q_PROPERTY(int selectedConversationIndex READ selectedConversationIndex NOTIFY conversationChanged)
     Q_PROPERTY(QString presence READ presence NOTIFY conversationChanged)
     Q_PROPERTY(QString connectionLabel READ connectionLabel NOTIFY connectionChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY connectionChanged)
@@ -51,6 +52,8 @@ class AppController final : public QObject
     Q_PROPERTY(QString microphoneTestStatus READ microphoneTestStatus NOTIFY settingsChanged)
     Q_PROPERTY(bool archivedVisible READ archivedVisible WRITE setArchivedVisible NOTIFY settingsChanged)
     Q_PROPERTY(bool callActive READ callActive NOTIFY callChanged)
+    Q_PROPERTY(bool callOngoing READ callOngoing NOTIFY callChanged)
+    Q_PROPERTY(QString callContact READ callContact NOTIFY callChanged)
     Q_PROPERTY(bool microphoneEnabled READ microphoneEnabled NOTIFY callChanged)
     Q_PROPERTY(bool cameraEnabled READ cameraEnabled NOTIFY callChanged)
     Q_PROPERTY(bool sharingScreen READ sharingScreen NOTIFY callChanged)
@@ -65,6 +68,7 @@ class AppController final : public QObject
     Q_PROPERTY(bool autostartEnabled READ autostartEnabled WRITE setAutostartEnabled NOTIFY settingsChanged)
     Q_PROPERTY(bool updateAvailable READ updateAvailable NOTIFY updateChanged)
     Q_PROPERTY(QString updateVersion READ updateVersion NOTIFY updateChanged)
+    Q_PROPERTY(int videoQualityPreset READ videoQualityPreset NOTIFY settingsChanged)
 
 public:
     explicit AppController(QObject *parent = nullptr);
@@ -81,6 +85,7 @@ public:
     [[nodiscard]] QString profileName() const;
     [[nodiscard]] QString profileAvatar() const;
     [[nodiscard]] QString conversationName() const;
+    [[nodiscard]] int selectedConversationIndex() const;
     [[nodiscard]] QString presence() const;
     [[nodiscard]] QString connectionLabel() const;
     [[nodiscard]] QString lastError() const;
@@ -109,6 +114,8 @@ public:
     [[nodiscard]] QString microphoneTestStatus() const;
     [[nodiscard]] bool archivedVisible() const;
     [[nodiscard]] bool callActive() const;
+    [[nodiscard]] bool callOngoing() const;
+    [[nodiscard]] QString callContact() const;
     [[nodiscard]] bool microphoneEnabled() const;
     [[nodiscard]] bool cameraEnabled() const;
     [[nodiscard]] bool sharingScreen() const;
@@ -123,6 +130,7 @@ public:
     [[nodiscard]] bool autostartEnabled() const;
     [[nodiscard]] bool updateAvailable() const;
     [[nodiscard]] QString updateVersion() const;
+    [[nodiscard]] int videoQualityPreset() const;
 
     Q_INVOKABLE void selectConversation(int index);
     Q_INVOKABLE void sendMessage(const QString &body);
@@ -264,12 +272,14 @@ private:
     QString m_lastError;
     QString m_focusedMessageId;
     QString m_callId;
+    QString m_callContact;
     QString m_pendingCallId;
     QString m_pendingCallContact;
     bool m_pendingCallRinging = false;
     QString m_callState = QStringLiteral("idle");
     QString m_heldCallId;
     QString m_heldCallContact;
+    QVariantList m_heldCallParticipants;
     bool m_doNotDisturb = false;
     QString m_voiceMode = QStringLiteral("open");
     QString m_pushToTalkShortcut = QStringLiteral("Ctrl+Space");
@@ -288,4 +298,5 @@ private:
     bool m_updateAvailable = false;
     QString m_updateVersion;
     QUrl m_updateUrl;
+    int m_videoQualityPreset = 0;
 };

@@ -161,6 +161,7 @@ pub trait MediaEngine: Send + Sync {
 pub struct GstMediaEngine {
     pipelines: Mutex<Vec<(MediaKind, gst::Pipeline, gst_app::AppSink)>>,
     receivers: Mutex<Vec<(DeviceId, MediaKind, gst::Pipeline, gst_app::AppSrc)>>,
+    receive_volumes: Mutex<BTreeMap<DeviceId, f64>>,
     selected_devices: Mutex<BTreeMap<MediaDeviceKind, String>>,
     stats: Mutex<MediaStats>,
 }
@@ -179,6 +180,7 @@ impl GstMediaEngine {
         Ok(Self {
             pipelines: Mutex::new(Vec::new()),
             receivers: Mutex::new(Vec::new()),
+            receive_volumes: Mutex::new(BTreeMap::new()),
             selected_devices: Mutex::new(BTreeMap::new()),
             stats: Mutex::new(MediaStats::default()),
         })
@@ -421,6 +423,19 @@ impl GstMediaEngine {
             .ok_or_else(|| MediaError::Pipeline("receiver has no RTP source".into()))?
             .downcast::<gst_app::AppSrc>()
             .map_err(|_| MediaError::Pipeline("RTP source has the wrong type".into()))?;
+        if matches!(kind, MediaKind::Voice | MediaKind::SystemAudio) {
+            let volume = self
+                .receive_volumes
+                .lock()
+                .map_err(|_| MediaError::Poisoned)?
+                .get(&source_id)
+                .copied()
+                .unwrap_or(1.0);
+            let element = pipeline
+                .by_name("participant_volume")
+                .ok_or_else(|| MediaError::Pipeline("receiver has no volume control".into()))?;
+            element.set_property("volume", volume);
+        }
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|error| MediaError::Pipeline(error.to_string()))?;
@@ -627,6 +642,10 @@ impl MediaEngine for GstMediaEngine {
                 "participant volume must be between 0 and 200 percent".into(),
             ));
         }
+        self.receive_volumes
+            .lock()
+            .map_err(|_| MediaError::Poisoned)?
+            .insert(source_id, volume);
         let receivers = self.receivers.lock().map_err(|_| MediaError::Poisoned)?;
         for (source, kind, pipeline, _) in receivers.iter() {
             if *source != source_id || !matches!(kind, MediaKind::Voice | MediaKind::SystemAudio) {
@@ -784,6 +803,27 @@ mod tests {
         );
         assert!(buffer.push(packet(1)).is_empty());
         assert_eq!(buffer.dropped(), 1);
+    }
+
+    #[tokio::test]
+    async fn participant_volume_is_remembered_before_media_arrives() {
+        let engine = GstMediaEngine::new().expect("GStreamer");
+        let device = DeviceId::from_bytes([7; 32]);
+
+        engine
+            .set_receive_volume(device, 0.35)
+            .await
+            .expect("store participant volume");
+
+        assert_eq!(
+            engine
+                .receive_volumes
+                .lock()
+                .expect("volume settings")
+                .get(&device)
+                .copied(),
+            Some(0.35)
+        );
     }
 
     #[test]
