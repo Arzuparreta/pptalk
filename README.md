@@ -32,10 +32,11 @@ firmada con un certificado comercial.
 
 Los dos debéis tener pptalk abierto durante la primera conexión.
 
-1. Pulsa **+** en la esquina superior izquierda.
+1. Pulsa **Nuevo → Añadir contacto** en la esquina superior izquierda.
 2. Enseña el QR o pulsa **Copiar enlace** y envíaselo a tu amigo por un canal de
    confianza.
-3. Tu amigo abre su propio botón **+**, pega el enlace, pulsa **Revisar invitación**
+3. Tu amigo abre **Nuevo → Añadir contacto → Aceptar invitación**, pega el
+   enlace, pulsa **Revisar invitación**
    y confirma tu nombre.
 4. La conversación aparecerá en la columna izquierda.
 
@@ -45,11 +46,11 @@ vigencia funciona como una invitación privada.
 ## Hablar
 
 - Escribe abajo y pulsa `Enter` para enviar. `Shift + Enter` añade una línea.
-- Pulsa el **+** junto al cuadro de texto para enviar un archivo cifrado.
+- Pulsa **Adjuntar archivo cifrado** junto al cuadro de texto para enviar un archivo.
 - También puedes arrastrar archivos sobre la conversación.
-- Pulsa el **teléfono** para llamar o abrir una sala sin hacer sonar al otro.
-- Pulsa **◫** arriba a la izquierda para crear un grupo con contactos existentes.
-- Pulsa **⚙** para cambiar tu perfil, configurar llamadas o vincular otro dispositivo.
+- Pulsa **Llamar** para iniciar una llamada o abrir una sala sin hacer sonar al otro.
+- Pulsa **Nuevo → Crear grupo privado** para crear un grupo con contactos existentes.
+- Pulsa tu perfil, abajo a la izquierda, para abrir **Ajustes**.
 
 La [guía de uso](docs/user-guide.md) explica cada pantalla, los grupos, las
 llamadas, el uso sin conexión y la vinculación de dispositivos.

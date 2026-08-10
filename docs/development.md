@@ -57,6 +57,20 @@ cmake --build build/desktop
 QT_QPA_PLATFORM=offscreen timeout 3s ./build/desktop/pptalk-desktop
 ```
 
+Para revisar una pantalla sin tocar el perfil de uso diario, arranca con una
+copia o un perfil temporal y pide una captura al propio `QQuickWindow`:
+
+```sh
+PPTALK_PROFILE=/tmp/pptalk-ui/profile.json \
+PPTALK_SCREENSHOT_PATH=/tmp/pptalk-ui.png \
+QT_QPA_PLATFORM=offscreen ./build/desktop/pptalk-desktop
+```
+
+`PPTALK_SCREENSHOT_DELAY_MS` permite aumentar la espera previa a la captura.
+`PPTALK_SCREENSHOT_PANEL=settingsDrawer` o `inviteDialog` abre ese panel antes
+de capturar.
+No uses el único perfil de una persona como fixture visual.
+
 El controlador Qt inicia `pptalk-cli daemon`. Durante desarrollo, define
 `PPTALK_CLI` si el binario no está junto al ejecutable de escritorio. No hay
 toolchain Node.js ni runtime de navegador.

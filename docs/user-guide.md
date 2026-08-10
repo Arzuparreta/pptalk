@@ -16,14 +16,14 @@ La ventana tiene dos zonas:
 - a la izquierda están tus contactos y grupos;
 - a la derecha está la conversación seleccionada, sus mensajes y sus llamadas.
 
-Si todavía no tienes contactos, empieza con el botón **+** de la esquina
+Si todavía no tienes contactos, pulsa **Nuevo → Añadir contacto** en la esquina
 superior izquierda.
 
 ## Conectar con otra persona
 
 ### Si tú invitas
 
-1. Abre el botón **+** superior.
+1. Abre **Nuevo → Añadir contacto**.
 2. pptalk crea un enlace que empieza por `pptalk://contact/`.
 3. Enseña el QR o pulsa **Copiar enlace**.
 4. Envíalo a la persona por un medio de confianza.
@@ -32,8 +32,8 @@ superior izquierda.
 ### Si recibes la invitación
 
 1. Copia el enlace completo que te han enviado.
-2. Abre pptalk y pulsa **+**.
-3. Pega el enlace en “O pega una invitación que te hayan enviado”.
+2. Abre **Nuevo → Añadir contacto → Aceptar invitación**.
+3. Pega el enlace completo.
 4. Pulsa **Revisar invitación**.
 5. Comprueba el nombre y la caducidad y confirma **Aceptar**.
 
@@ -48,8 +48,8 @@ Selecciona un contacto o grupo en la columna izquierda.
 
 - `Enter` envía el mensaje.
 - `Shift + Enter` inserta una nueva línea.
-- El botón **➤** también envía.
-- El botón **+** situado junto al mensaje abre el selector de archivos.
+- El botón **Enviar mensaje** también envía.
+- **Adjuntar archivo cifrado** abre el selector de archivos.
 
 Los archivos se cifran antes de salir del dispositivo. Si el receptor no está
 disponible, pptalk intenta entregarlos cuando vuelva a existir una ruta. Durante
@@ -64,7 +64,7 @@ envía confirmaciones de lectura.
 
 pptalk conserva un borrador distinto para cada conversación. Al responder o
 editar aparece una franja que permite cancelar la acción. Para enviar archivos
-puedes pulsar el **+** o arrastrarlos sobre la conversación; durante el envío se
+puedes pulsar **Adjuntar archivo cifrado** o arrastrarlos sobre la conversación; durante el envío se
 muestra el progreso.
 
 El menú **⋯** de un contacto permite fijar, archivar o silenciar la conversación,
@@ -82,7 +82,7 @@ intermedia.
 ## Crear y administrar un grupo
 
 1. Añade primero a cada participante como contacto.
-2. Pulsa **◫** en la parte superior izquierda.
+2. Pulsa **Nuevo → Crear grupo privado**.
 3. Escribe un nombre para el grupo.
 4. Marca los contactos que quieres incluir.
 5. Pulsa **Crear grupo privado**.
@@ -101,29 +101,32 @@ claves para los mensajes siguientes.
 
 ## Llamadas
 
-Pulsa el icono de **teléfono** de la conversación seleccionada:
+Pulsa **Llamar** en la conversación seleccionada:
 
-- **Abrir sala sin llamar** crea una sala a la que los demás pueden entrar sin
+- **Abrir sala sin hacer sonar** crea una sala a la que los demás pueden entrar sin
   hacer sonar sus dispositivos.
-- **Llamar** o **Llamar al grupo** envía una llamada visible.
+- **Llamar** envía una llamada visible al contacto o al grupo.
 
-Durante la llamada puedes activar o desactivar:
+La barra de llamada permanece visible aunque cambies de conversación. Durante
+la llamada puedes activar o desactivar:
 
-- micrófono: botón **◉**;
-- cámara: botón **▣**;
-- compartir pantalla: botón **↗**.
+- micrófono: **Micrófono** o **Silenciado**;
+- cámara: **Encender cámara** o **Apagar cámara**;
+- pantalla: **Compartir pantalla** o **Dejar de compartir**.
 
-Pulsa **Personas** para ver quién está conectado y ajustar su volumen. En
+Pulsa el botón con el número de **personas** para ver quién está conectado y
+ajustar su volumen. En
 **Ajustes** puedes elegir micrófono, auriculares y cámara, y pulsar **Probar
 micrófono** antes de llamar.
 
 El micrófono, la cámara y la pantalla permanecen apagados mientras suena la
 llamada; el micrófono se activa al aceptar. Si nadie responde, la llamada termina
-a los 30 segundos y queda como perdida. **Ⅱ** retiene una llamada y **Salir** la
-abandona. Las llamadas contestadas, rechazadas y perdidas quedan en el historial
+a los 30 segundos y queda como perdida. **Pausa** retiene una llamada; la misma
+barra muestra **Reanudar** y **Salir**. Las llamadas contestadas, rechazadas y
+perdidas quedan en el historial
 local de la conversación.
 
-En **⚙ → Calidad de cámara y pantalla** puedes dejar calidad automática o fijar
+En **Ajustes → Audio → Cámara y pantalla** puedes dejar calidad automática o fijar
 una resolución. Si eliges un modo manual que el equipo no puede cumplir, pptalk
 muestra el error en vez de reducir la calidad silenciosamente.
 
@@ -140,7 +143,7 @@ que coincidáis abiertos, no antes.
 ### Recibir mientras no estás
 
 Para que no haga falta coincidir, indica un buzón en
-**Ajustes → Buzón para mensajes sin conexión**: escribe su dirección y pulsa
+**Ajustes → Buzón → Mensajes sin conexión**: escribe su dirección y pulsa
 **Guardar buzón**. pptalk comprueba que responde y avisa a tus contactos de la
 dirección; a los que estén desconectados les llegará el aviso al reconectar.
 
@@ -162,9 +165,9 @@ parte de tu identidad sin copiar sus claves internas.
 
 En el dispositivo ya autorizado:
 
-1. abre **⚙ → Vincular otro dispositivo**;
+1. abre tu perfil y entra en **Ajustes → Equipos → Vincular otro dispositivo**;
 2. escribe un nombre, por ejemplo “Portátil”;
-3. pulsa **Generar enlace (10 min)** y después **Copiar**;
+3. pulsa **Generar enlace** y después **Copiar**;
 4. transfiere el enlace al dispositivo nuevo por un canal de confianza.
 
 En el dispositivo nuevo abre pptalk, elige **Vincular equipo**, pega el enlace y
@@ -182,7 +185,10 @@ Una identidad admite como máximo cinco dispositivos activos.
 
 ## Ajustes
 
-**No molestar** es manual y no caduca solo. **Micrófono al entrar** permite elegir
+Pulsa tu perfil, abajo a la izquierda. El panel separa **General**, **Audio**,
+**Equipos** y **Buzón** para que cada ajuste tenga un lugar predecible.
+
+**No molestar** es manual y no caduca solo. **Cómo hablas** permite elegir
 **Micrófono abierto** o **Pulsar para hablar**. En Windows
 aparece **Abrir pptalk al iniciar sesión**, desactivado de forma predeterminada;
 también está disponible en escritorios Linux. Al iniciar sesión, pptalk queda
@@ -196,7 +202,7 @@ AUR se actualizan con el gestor de paquetes.
 
 ## Proteger y copiar la identidad
 
-En **Ajustes → Protección local**, pulsa **Proteger con el sistema** para mover la
+En **Ajustes → Equipos → Protección local**, pulsa **Proteger con el sistema** para mover la
 clave del historial al almacén seguro de Windows o Linux. pptalk verifica que
 puede recuperarla antes de eliminarla del archivo de perfil.
 
