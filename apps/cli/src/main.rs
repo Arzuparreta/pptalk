@@ -1037,7 +1037,7 @@ async fn daemon(path: &Path) -> Result<()> {
     save_profile(path, &profile)?;
     emit_json(&serde_json::json!({
         "event":"ready",
-        "identity_id":profile.identity_id,
+        "identity_id":profile.identity_id.to_string(),
         "name":profile.name,
         "avatar":profile.avatar,
         "secure_storage":profile.database_key_in_keyring,
@@ -1531,7 +1531,7 @@ async fn daemon(path: &Path) -> Result<()> {
                         emit_json(&serde_json::json!({
                             "event":"invite_preview", "url":url,
                             "name":invite.display_name, "expires_unix":invite.expires_unix,
-                            "identity_id":invite.inviter_identity
+                            "identity_id":invite.inviter_identity.to_string()
                         }))?;
                     }
                     DaemonCommand::Accept { url } => {
@@ -2418,7 +2418,7 @@ async fn daemon(path: &Path) -> Result<()> {
                         }
                         match media.set_receive_volume(device, volume).await {
                             Ok(()) => emit_json(&serde_json::json!({
-                                "event":"participant_volume", "device_id":device,
+                                "event":"participant_volume", "device_id":device.to_string(),
                                 "volume":volume
                             }))?,
                             Err(error) => emit_json(&serde_json::json!({
@@ -2620,7 +2620,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             "event":"call_connected", "call_id":call_id.to_string(),
                             "remote_endpoint":remote_endpoint,
                             "contact":remote_contact.map(|contact| contact.name.clone()),
-                            "device_id":remote_contact.map(|contact| contact.device_id)
+                            "device_id":remote_contact.map(|contact| contact.device_id.to_string())
                         }))?;
                     }
                     CallSignal::Reject { call_id, missed } => {
@@ -2659,7 +2659,7 @@ async fn daemon(path: &Path) -> Result<()> {
                             emit_json(&serde_json::json!({
                                 "event":"call_participant_leave", "call_id":call_id.to_string(),
                                 "remote_endpoint":remote_endpoint,
-                                "device_id":remote_contact.map(|contact| contact.device_id)
+                                "device_id":remote_contact.map(|contact| contact.device_id.to_string())
                             }))?;
                         }
                     }
@@ -4071,8 +4071,8 @@ fn emit_contacts(profile: &Profile) -> Result<()> {
             Some(serde_json::json!({
                 "name":contact.name,
                 "avatar":contact.avatar,
-                "identity_id":contact.identity_id,
-                "device_id":contact.device_id,
+                "identity_id":contact.identity_id.to_string(),
+                "device_id":contact.device_id.to_string(),
                 "device_count":device_count,
                 "verified":contact.verified,
                 "manually_verified":contact.manually_verified,
@@ -4121,7 +4121,7 @@ fn emit_groups(profile: &Profile) -> Result<()> {
         .iter()
         .map(|group| {
             serde_json::json!({
-                "id":group.id.to_string(), "name":group.name, "owner":group.owner,
+                "id":group.id.to_string(), "name":group.name, "owner":group.owner.to_string(),
                 "member_count":group.members.len(), "device_count":group.member_devices.len(),
                 "admin_count":group.admins.len(),
                 "owned":group.owner == profile.identity_id,
@@ -4446,7 +4446,7 @@ fn call_participants_json(recipients: &[Contact]) -> Vec<serde_json::Value> {
         .map(|recipient| {
             serde_json::json!({
                 "name":recipient.name,
-                "device_id":recipient.device_id,
+                "device_id":recipient.device_id.to_string(),
                 "volume":1.0
             })
         })
