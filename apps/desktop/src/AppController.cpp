@@ -123,6 +123,9 @@ AppController::AppController(QObject *parent)
         settings.value(QStringLiteral("calls/pushToTalkShortcut"),
                        QStringLiteral("Ctrl+Space")).toString();
     m_archivedVisible = settings.value(QStringLiteral("conversations/showArchived"), false).toBool();
+    m_videoQualityPreset = settings.value(QStringLiteral("media/videoQualityPreset"), 0).toInt();
+    if (m_videoQualityPreset < 0 || m_videoQualityPreset > 4) m_videoQualityPreset = 0;
+    configureVideoQuality(m_videoQualityPreset);
     if (m_voiceMode != QStringLiteral("push_to_talk")) m_voiceMode = QStringLiteral("open");
     qApp->installEventFilter(this);
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
@@ -203,6 +206,7 @@ QString AppController::conversationName() const
     }
     return m_contacts.value(m_selectedConversation).toMap().value(QStringLiteral("name")).toString();
 }
+int AppController::selectedConversationIndex() const { return m_selectedConversation; }
 
 QString AppController::presence() const
 {
@@ -299,6 +303,14 @@ QString AppController::mailboxStatus() const { return m_mailboxStatus; }
 QString AppController::microphoneTestStatus() const { return m_microphoneTestStatus; }
 bool AppController::archivedVisible() const { return m_archivedVisible; }
 bool AppController::callActive() const { return m_callActive; }
+bool AppController::callOngoing() const
+{
+    return !m_callId.isEmpty() || !m_heldCallId.isEmpty();
+}
+QString AppController::callContact() const
+{
+    return !m_callContact.isEmpty() ? m_callContact : m_heldCallContact;
+}
 bool AppController::microphoneEnabled() const { return m_microphoneEnabled; }
 bool AppController::cameraEnabled() const { return m_cameraEnabled; }
 bool AppController::sharingScreen() const { return m_sharingScreen; }
@@ -336,6 +348,7 @@ bool AppController::autostartEnabled() const
 
 bool AppController::updateAvailable() const { return m_updateAvailable; }
 QString AppController::updateVersion() const { return m_updateVersion; }
+int AppController::videoQualityPreset() const { return m_videoQualityPreset; }
 
 void AppController::downloadUpdate()
 {
@@ -479,6 +492,21 @@ void AppController::clearSearch()
 void AppController::openSearchResult(const QString &conversationKey,
                                      const QString &messageId)
 {
+    if (!m_archivedVisible) {
+        const auto hiddenMatch = [this, &conversationKey](const QVariantList &items,
+                                                          const QString &keyName) {
+            return std::any_of(items.cbegin(), items.cend(),
+                               [&conversationKey, &keyName](const QVariant &value) {
+                const auto item = value.toMap();
+                return item.value(keyName).toString() == conversationKey &&
+                       item.value(QStringLiteral("archived")).toBool();
+            });
+        };
+        if (hiddenMatch(m_directContacts, QStringLiteral("identityId")) ||
+            hiddenMatch(m_groups, QStringLiteral("groupId"))) {
+            setArchivedVisible(true);
+        }
+    }
     for (qsizetype index = 0; index < m_contacts.size(); ++index) {
         const auto item = m_contacts.at(index).toMap();
         const auto key = item.value(QStringLiteral("group")).toBool()
@@ -692,8 +720,10 @@ void AppController::createGroup(const QString &name, const QString &members)
 
 void AppController::configureVideoQuality(const int preset)
 {
-    m_manualVideoQuality = preset > 0;
-    switch (preset) {
+    const auto selectedPreset = qBound(0, preset, 4);
+    m_videoQualityPreset = selectedPreset;
+    m_manualVideoQuality = selectedPreset > 0;
+    switch (selectedPreset) {
     case 1:
         m_videoWidth = 1280; m_videoHeight = 720; m_videoFramesPerSecond = 30;
         m_videoBitrateKbps = 2500;
@@ -715,6 +745,8 @@ void AppController::configureVideoQuality(const int preset)
         m_videoBitrateKbps = 2500;
         break;
     }
+    QSettings().setValue(QStringLiteral("media/videoQualityPreset"), selectedPreset);
+    emit settingsChanged();
 }
 
 void AppController::selectMediaDevice(const QString &kind, const QString &deviceId)
@@ -865,14 +897,24 @@ void AppController::startCall(const bool ringEveryone)
 
 void AppController::leaveCall()
 {
-    if (!m_callId.isEmpty() && !m_contacts.isEmpty()) {
+    const bool leavingActive = !m_callId.isEmpty();
+    const auto callId = leavingActive ? m_callId : m_heldCallId;
+    const auto contact = leavingActive ? m_callContact : m_heldCallContact;
+    if (!callId.isEmpty() && !contact.isEmpty()) {
         sendBackendCommand({{QStringLiteral("command"), QStringLiteral("leave_call")},
-                            {QStringLiteral("contact"), conversationName()},
-                            {QStringLiteral("call_id"), m_callId},
+                            {QStringLiteral("contact"), contact},
+                            {QStringLiteral("call_id"), callId},
                             {QStringLiteral("missed"), false}});
     }
     m_callActive = false;
     m_callId.clear();
+    m_callContact.clear();
+    if (!leavingActive) {
+        m_heldCallId.clear();
+        m_heldCallContact.clear();
+        m_heldCallParticipants.clear();
+    }
+    m_callState = m_heldCallId.isEmpty() ? QStringLiteral("idle") : QStringLiteral("held");
     m_microphoneEnabled = false;
     m_cameraEnabled = false;
     m_sharingScreen = false;
@@ -898,10 +940,19 @@ void AppController::toggleScreenShare()
 void AppController::setParticipantVolume(const QString &deviceId, const double volume)
 {
     if (m_callId.isEmpty() || deviceId.isEmpty()) return;
+    const auto bounded = qBound(0.0, volume, 2.0);
+    for (qsizetype index = 0; index < m_callParticipants.size(); ++index) {
+        auto item = m_callParticipants.at(index).toMap();
+        if (item.value(QStringLiteral("deviceId")).toString() != deviceId) continue;
+        item[QStringLiteral("volume")] = bounded;
+        m_callParticipants[index] = item;
+        emit callChanged();
+        break;
+    }
     sendBackendCommand({{QStringLiteral("command"), QStringLiteral("set_participant_volume")},
                         {QStringLiteral("call_id"), m_callId},
                         {QStringLiteral("device_id"), deviceId},
-                        {QStringLiteral("volume"), qBound(0.0, volume, 2.0)}});
+                        {QStringLiteral("volume"), bounded}});
 }
 
 void AppController::removeCurrentContact()
@@ -1159,11 +1210,11 @@ void AppController::declineIncomingCall()
 
 void AppController::setMedia(const QString &kind, const bool enabled)
 {
-    if (!m_callActive || m_callId.isEmpty() || m_contacts.isEmpty()) {
+    if (!m_callActive || m_callId.isEmpty() || m_callContact.isEmpty()) {
         return;
     }
     QVariantMap command{{QStringLiteral("command"), QStringLiteral("set_media")},
-                        {QStringLiteral("contact"), conversationName()},
+                        {QStringLiteral("contact"), m_callContact},
                         {QStringLiteral("call_id"), m_callId},
                         {QStringLiteral("kind"), kind},
                         {QStringLiteral("enabled"), enabled}};
@@ -1733,6 +1784,7 @@ void AppController::processBackendOutput()
             emit callChanged();
         } else if (event == QStringLiteral("call_started")) {
             m_callId = object.value(QStringLiteral("call_id")).toString();
+            m_callContact = object.value(QStringLiteral("contact")).toString();
             m_callActive = true;
             const auto ringing = object.value(QStringLiteral("ring")).toBool();
             m_callState = ringing ? QStringLiteral("calling") : QStringLiteral("connected");
@@ -1746,7 +1798,7 @@ void AppController::processBackendOutput()
                 QTimer::singleShot(30000, this, [this, outgoingId]() {
                     if (m_callId != outgoingId || m_callState != QStringLiteral("calling")) return;
                     sendBackendCommand({{QStringLiteral("command"), QStringLiteral("leave_call")},
-                                        {QStringLiteral("contact"), conversationName()},
+                                        {QStringLiteral("contact"), m_callContact},
                                         {QStringLiteral("call_id"), m_callId},
                                         {QStringLiteral("missed"), true}});
                 });
@@ -1754,6 +1806,8 @@ void AppController::processBackendOutput()
         } else if (event == QStringLiteral("call_joined") ||
                    event == QStringLiteral("call_connected")) {
             m_callId = object.value(QStringLiteral("call_id")).toString();
+            const auto eventContact = object.value(QStringLiteral("contact")).toString();
+            if (!eventContact.isEmpty()) m_callContact = eventContact;
             m_callActive = true;
             m_callState = QStringLiteral("connected");
             const auto participants = object.value(QStringLiteral("participants")).toArray();
@@ -1781,17 +1835,25 @@ void AppController::processBackendOutput()
                 setMedia(QStringLiteral("voice"), true);
         } else if (event == QStringLiteral("call_held")) {
             m_heldCallId = object.value(QStringLiteral("call_id")).toString();
-            m_heldCallContact = object.value(QStringLiteral("contact")).toString();
+            const auto eventContact = object.value(QStringLiteral("contact")).toString();
+            m_heldCallContact = eventContact.isEmpty() ? m_callContact : eventContact;
             if (m_callId == m_heldCallId) {
                 m_callId.clear();
+                m_callContact.clear();
                 m_callActive = false;
+                m_heldCallParticipants = m_callParticipants;
+                m_callParticipants.clear();
             }
             m_callState = QStringLiteral("held");
             emit callChanged();
         } else if (event == QStringLiteral("call_resumed")) {
             m_callId = object.value(QStringLiteral("call_id")).toString();
+            const auto eventContact = object.value(QStringLiteral("contact")).toString();
+            m_callContact = eventContact.isEmpty() ? m_heldCallContact : eventContact;
+            m_callParticipants = m_heldCallParticipants;
             m_heldCallId.clear();
             m_heldCallContact.clear();
+            m_heldCallParticipants.clear();
             m_callActive = true;
             m_callState = QStringLiteral("connected");
             emit callChanged();
@@ -1799,6 +1861,7 @@ void AppController::processBackendOutput()
                 setMedia(QStringLiteral("voice"), true);
         } else if (event == QStringLiteral("call_rejected")) {
             m_callId.clear();
+            m_callContact.clear();
             m_callActive = false;
             m_callState = object.value(QStringLiteral("outcome")).toString() == QStringLiteral("missed")
                 ? QStringLiteral("missed") : QStringLiteral("rejected");
@@ -1836,6 +1899,7 @@ void AppController::processBackendOutput()
         } else if (event == QStringLiteral("call_left") ||
                    event == QStringLiteral("call_leave")) {
             m_callId.clear();
+            m_callContact.clear();
             m_callActive = false;
             m_microphoneEnabled = false;
             m_cameraEnabled = false;

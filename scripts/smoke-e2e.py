@@ -303,6 +303,24 @@ def main() -> None:
             )
             bob.event("call_joined")
             alice.event("call_connected")
+            participant = ringing_call["participants"][0]
+            alice.send(
+                {
+                    "command": "set_participant_volume",
+                    "call_id": ringing_call["call_id"],
+                    "device_id": participant["device_id"],
+                    "volume": 0.35,
+                }
+            )
+            volume = alice.event("participant_volume")
+            if volume.get("device_id") != participant["device_id"] or volume.get("volume") != 0.35:
+                raise RuntimeError(f"participant volume did not round-trip: {volume}")
+            alice.send({"command": "hold_call", "call_id": ringing_call["call_id"]})
+            alice.event("call_held")
+            bob.event("call_remote_held")
+            alice.send({"command": "resume_call", "call_id": ringing_call["call_id"]})
+            alice.event("call_resumed")
+            bob.event("call_remote_resumed")
             bob.send(
                 {
                     "command": "leave_call",

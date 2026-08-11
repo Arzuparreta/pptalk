@@ -3,23 +3,36 @@ import QtQuick.Controls
 
 Button {
     id: root
-    property string glyph: ""
+    property string iconName: "more"
+    property string description: ""
     property bool active: false
-    implicitWidth: 40
-    implicitHeight: 40
-    hoverEnabled: true
+    property bool danger: false
+    property int buttonSize: 40
 
-    contentItem: Text {
-        text: root.glyph
-        color: root.active ? "#F4F2FF" : "#B7B3C9"
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-        font.pixelSize: 17
+    implicitWidth: buttonSize
+    implicitHeight: buttonSize
+    padding: 0
+    hoverEnabled: true
+    Accessible.name: description
+
+    contentItem: AppIcon {
+        name: root.iconName
+        color: root.danger ? Theme.danger
+             : (root.active ? Theme.text : (root.hovered ? Theme.text : Theme.textMuted))
+        anchors.centerIn: parent
+        width: 19
+        height: 19
     }
     background: Rectangle {
-        radius: 12
-        color: root.active ? "#6658D9" : (root.hovered ? "#292635" : "transparent")
-        border.color: root.active ? "#877BEE" : "#373342"
-        border.width: root.active || root.hovered ? 1 : 0
+        radius: Theme.radius
+        color: root.down ? (root.danger ? Theme.dangerSoft : Theme.accentSoft)
+             : root.active ? Theme.accentStrong
+             : root.hovered ? Theme.surfaceHigh : "transparent"
+        border.color: root.active ? Theme.accent : (root.hovered ? Theme.borderStrong : Theme.border)
+        border.width: 1
+        Behavior on color { ColorAnimation { duration: 110 } }
     }
+    ToolTip.visible: hovered && description.length > 0
+    ToolTip.text: description
+    ToolTip.delay: 450
 }

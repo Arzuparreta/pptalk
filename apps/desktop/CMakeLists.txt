@@ -9,6 +9,8 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 Widgets)
 qt_standard_project_setup(REQUIRES 6.8)
 
+set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
 qt_add_executable(pptalk-desktop
     src/main.cpp
     src/AppController.cpp
@@ -20,11 +22,28 @@ qt_add_qml_module(pptalk-desktop
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/Theme.qml
+        qml/components/ActionButton.qml
+        qml/components/AppCheckBox.qml
+        qml/components/AppComboBox.qml
+        qml/components/AppDialog.qml
+        qml/components/AppIcon.qml
+        qml/components/AppMenu.qml
+        qml/components/AppMenuItem.qml
+        qml/components/AppMenuSeparator.qml
+        qml/components/AppProgressBar.qml
+        qml/components/AppSlider.qml
+        qml/components/AppSwitch.qml
+        qml/components/AppTextArea.qml
+        qml/components/AppTextField.qml
         qml/components/Avatar.qml
         qml/components/ChatBubble.qml
+        qml/components/CallPanel.qml
         qml/components/DesktopAutostartSetting.qml
         qml/components/IconButton.qml
         qml/components/Onboarding.qml
+        qml/components/SectionCard.qml
+        qml/components/SettingsDrawer.qml
 )
 
 target_link_libraries(pptalk-desktop PRIVATE

@@ -39,13 +39,15 @@ jobs:
           cache: true
       - run: cmake -S apps/desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build/desktop
-      - name: Smoke-test desktop startup
+      - name: Lint QML
+        run: qmllint -I build/desktop apps/desktop/qml/Main.qml apps/desktop/qml/Theme.qml apps/desktop/qml/components/*.qml
+      - name: Render desktop onboarding smoke
         run: |
-          set +e
-          QT_QPA_PLATFORM=offscreen timeout 3s ./build/desktop/pptalk-desktop
-          status="$?"
-          set -e
-          test "$status" -eq 124
+          QT_QPA_PLATFORM=offscreen \
+          PPTALK_PROFILE="$RUNNER_TEMP/pptalk-ui-profile.json" \
+          PPTALK_SCREENSHOT_PATH="$RUNNER_TEMP/pptalk-onboarding.png" \
+          ./build/desktop/pptalk-desktop
+          test -s "$RUNNER_TEMP/pptalk-onboarding.png"
 
   desktop-windows:
     runs-on: windows-2025

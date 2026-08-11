@@ -6,7 +6,9 @@
 #include <QLocalSocket>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlError>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QStandardPaths>
 #include <QSettings>
 #include <QTimer>
@@ -62,6 +64,10 @@ int main(int argc, char *argv[])
     });
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
+    QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app,
+                     [](const QList<QQmlError> &warnings) {
+        for (const auto &warning : warnings) qWarning().noquote() << warning.toString();
+    });
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
                      [] { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("Pptalk"), QStringLiteral("Main"));
@@ -76,6 +82,30 @@ int main(int argc, char *argv[])
                 settings.setValue(QStringLiteral("window/width"), window->width());
                 settings.setValue(QStringLiteral("window/height"), window->height());
             });
+            const auto screenshotPath = qEnvironmentVariable("PPTALK_SCREENSHOT_PATH");
+            if (!screenshotPath.isEmpty()) {
+                const auto panelName = qEnvironmentVariable("PPTALK_SCREENSHOT_PANEL");
+                if (!panelName.isEmpty()) {
+                    QTimer::singleShot(100, window, [window, panelName]() {
+                        if (auto *panel = window->findChild<QObject *>(panelName)) {
+                            QMetaObject::invokeMethod(panel, "open");
+                        } else {
+                            qWarning().noquote() << "Could not find UI panel" << panelName;
+                        }
+                    });
+                }
+                const auto delay = qEnvironmentVariableIntValue("PPTALK_SCREENSHOT_DELAY_MS");
+                QTimer::singleShot(delay > 0 ? delay : 800, window,
+                                   [window, screenshotPath]() {
+                    if (auto *quickWindow = qobject_cast<QQuickWindow *>(window)) {
+                        if (!quickWindow->grabWindow().save(screenshotPath)) {
+                            qWarning().noquote() << "Could not save UI screenshot to"
+                                                 << screenshotPath;
+                        }
+                    }
+                    QCoreApplication::quit();
+                });
+            }
         }
     }
     if (QCoreApplication::arguments().contains(QStringLiteral("--minimized"))) {
