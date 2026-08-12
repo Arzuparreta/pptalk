@@ -1,17 +1,83 @@
 name: release
 
+# Releases are driven by workspace.package.version in Cargo.toml. When ci
+# succeeds on main and that version has no matching tag yet, this workflow
+# builds the artifacts and publishes them under a v<version> tag it creates.
+# Pushing a v* tag by hand still works and takes the same path.
 on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      publish: ${{ steps.resolve.outputs.publish }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
+      - name: Resolve the version to publish
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          tag="v${version}"
+
+          if [ "${EVENT_NAME}" = 'push' ]; then
+            # A hand-pushed tag must agree with the manifest, so the version a
+            # build reports is always the version it was released under.
+            if [ "${GITHUB_REF_NAME}" != "${tag}" ]; then
+              printf 'tag %s does not match workspace.package.version %s\n' \
+                "${GITHUB_REF_NAME}" "${version}" >&2
+              exit 1
+            fi
+            sha="${GITHUB_SHA}"
+            publish=true
+          else
+            sha="${HEAD_SHA}"
+            if gh release view "${tag}" >/dev/null 2>&1 \
+              || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              printf '%s is already released; bump workspace.package.version to publish\n' "${tag}"
+              publish=false
+            else
+              publish=true
+            fi
+          fi
+
+          {
+            printf 'publish=%s\n' "${publish}"
+            printf 'tag=%s\n' "${tag}"
+            printf 'sha=%s\n' "${sha}"
+          } >> "${GITHUB_OUTPUT}"
+          printf '::notice::%s publish=%s\n' "${tag}" "${publish}"
+
   linux:
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: jurplel/install-qt-action@v4
         with:
@@ -32,14 +98,17 @@ jobs:
           curl -fL "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" -o "$RUNNER_TEMP/linuxdeploy-plugin-qt"
           chmod +x "$RUNNER_TEMP/linuxdeploy" "$RUNNER_TEMP/linuxdeploy-plugin-qt"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}"
+      - run: bash scripts/package-linux.sh "${RELEASE_TAG}"
         env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
           PPTALK_ARTIFACT_ARCH: x86_64
           APPIMAGE_EXTRACT_AND_RUN: '1'
       - name: Smoke-test AppImage
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
         run: |
-          artifact="build/pptalk-${GITHUB_REF_NAME}-linux-x86_64.AppImage"
+          artifact="build/pptalk-${RELEASE_TAG}-linux-x86_64.AppImage"
           chmod +x "$artifact"
           "$artifact" --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/pptalk-desktop
@@ -49,7 +118,7 @@ jobs:
           status="$?"
           set -e
           test "$status" -eq 124
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: |
@@ -58,9 +127,13 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: jurplel/install-qt-action@v4
         with:
@@ -83,7 +156,9 @@ jobs:
           & "C:\gstreamer\bin\gst-inspect-1.0.exe" opusenc | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "GStreamer could not load the Opus encoder" }
       - shell: pwsh
-        run: ./scripts/package-windows.ps1 -Version $env:GITHUB_REF_NAME
+        run: ./scripts/package-windows.ps1 -Version $env:RELEASE_TAG
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
       - name: Smoke-test Windows installer and installed application
         shell: pwsh
         run: |
@@ -111,25 +186,32 @@ jobs:
           if (-not $Child) { throw "The installed desktop did not start its local daemon" }
           Stop-Process -Id $Process.Id
           $Child | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: build/*.exe
           if-no-files-found: error
 
   publish:
-    needs: [linux, windows]
+    needs: [gate, linux, windows]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
       - name: Create checksums
         working-directory: artifacts
         run: sha256sum * > SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      # Creates the tag at the built commit when it does not exist yet, so a
+      # failed build never leaves a tag behind with nothing released under it.
+      - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.gate.outputs.tag }}
+          name: ${{ needs.gate.outputs.tag }}
+          target_commitish: ${{ needs.gate.outputs.sha }}
           files: artifacts/*
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(needs.gate.outputs.tag, '-') }}

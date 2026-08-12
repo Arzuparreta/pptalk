@@ -3835,7 +3835,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "pptalk-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3866,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-core"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-media"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-mls"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "ciborium",
  "openmls",
@@ -3909,7 +3909,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-network"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-node"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -3948,7 +3948,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-protocol"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "base64",
  "blake3",
@@ -3963,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "pptalk-storage"
-version = "0.1.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "blake3",
  "hex",

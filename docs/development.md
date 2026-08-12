@@ -92,6 +92,28 @@ pptalk-cli send --profile bob.json --contact Alice 'hola'
 controlador nativo; cualquier cambio en sus comandos o eventos debe probarse en
 ambos lados.
 
+## Publicar una versión
+
+La versión de `[workspace.package]` en `Cargo.toml` es la fuente de verdad. Para
+publicar, súbela en un commit a `main`:
+
+```toml
+[workspace.package]
+version = "0.1.0-alpha.4"
+```
+
+Cuando `ci` pasa en `main`, el flujo `release` compara esa versión con los tags
+existentes. Si `v0.1.0-alpha.4` no existe todavía, compila el AppImage de Linux
+y el instalador de Windows, los somete a sus pruebas de humo y publica la
+release creando el tag sobre ese commit. Si el tag ya existe, no hace nada: un
+push que no toca la versión solo ejecuta `ci`.
+
+Los tags con guion (`-alpha`, `-beta`) salen marcados como prelanzamiento.
+
+Empujar un tag `v*` a mano sigue funcionando, pero debe coincidir con la versión
+del manifiesto; si no coincide, el flujo falla a propósito para que un binario
+nunca informe de una versión distinta a aquella con la que se publicó.
+
 ## Dónde está cada cosa
 
 - `apps/desktop`: interfaz Qt Quick y controlador C++.
