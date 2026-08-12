@@ -2717,8 +2717,10 @@ async fn daemon(path: &Path) -> Result<()> {
 }
 
 async fn check_for_update() -> Result<serde_json::Value> {
-    let release: serde_json::Value = reqwest::Client::new()
-        .get("https://api.github.com/repos/Arzuparreta/pptalk/releases/latest")
+    // `releases/latest` omits prereleases, so it reports nothing at all while
+    // every published build is one. List instead and pick by precedence.
+    let releases: Vec<serde_json::Value> = reqwest::Client::new()
+        .get("https://api.github.com/repos/Arzuparreta/pptalk/releases?per_page=20")
         .header(reqwest::header::USER_AGENT, "pptalk-update-check")
         .timeout(std::time::Duration::from_secs(8))
         .send()
@@ -2726,10 +2728,6 @@ async fn check_for_update() -> Result<serde_json::Value> {
         .error_for_status()?
         .json()
         .await?;
-    let latest = release
-        .get("tag_name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
     let current = env!("CARGO_PKG_VERSION");
     let architecture = match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -2740,42 +2738,146 @@ async fn check_for_update() -> Result<serde_json::Value> {
     } else {
         format!("linux-{architecture}.AppImage")
     };
-    let url = release
-        .get("assets")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|assets| {
-            assets.iter().find(|asset| {
-                asset
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|name| name.ends_with(&wanted_suffix))
-            })
-        })
-        .and_then(|asset| asset.get("browser_download_url"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let available = release_version(latest)
-        .is_some_and(|latest| release_version(current).is_some_and(|current| latest > current))
-        && !url.is_empty();
+    let newest = newest_release(&releases, &wanted_suffix, release_version(current).as_ref());
+    let (latest, url) = newest
+        .as_ref()
+        .map_or(("", ""), |candidate| (candidate.tag, candidate.url));
+    let available = newest.is_some_and(|candidate| {
+        release_version(current).is_some_and(|current| candidate.version > current)
+    });
     Ok(serde_json::json!({
         "event":"update", "available":available, "current":current,
         "version":latest, "url":url
     }))
 }
 
-fn release_version(value: &str) -> Option<(u64, u64, u64)> {
-    let stable = value
-        .trim()
-        .trim_start_matches('v')
-        .split(['-', '+'])
-        .next()?;
-    let mut components = stable.split('.');
-    let version = (
+#[derive(Debug)]
+struct ReleaseCandidate<'a> {
+    version: ReleaseVersion,
+    tag: &'a str,
+    url: &'a str,
+}
+
+/// Picks the highest release that ships an asset for this platform. A stable
+/// build is never offered a prerelease; a prerelease build is offered both.
+fn newest_release<'a>(
+    releases: &'a [serde_json::Value],
+    wanted_suffix: &str,
+    current: Option<&ReleaseVersion>,
+) -> Option<ReleaseCandidate<'a>> {
+    let accepts_prereleases = current.is_none_or(ReleaseVersion::is_prerelease);
+    releases
+        .iter()
+        .filter(|release| {
+            let flagged = |key| {
+                release
+                    .get(key)
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            };
+            !flagged("draft") && (accepts_prereleases || !flagged("prerelease"))
+        })
+        .filter_map(|release| {
+            let tag = release
+                .get("tag_name")
+                .and_then(serde_json::Value::as_str)?;
+            let url = release
+                .get("assets")
+                .and_then(serde_json::Value::as_array)?
+                .iter()
+                .find(|asset| {
+                    asset
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| name.ends_with(wanted_suffix))
+                })?
+                .get("browser_download_url")
+                .and_then(serde_json::Value::as_str)?;
+            Some(ReleaseCandidate {
+                version: release_version(tag)?,
+                tag,
+                url,
+            })
+        })
+        .max_by(|left, right| left.version.cmp(&right.version))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseVersion {
+    core: (u64, u64, u64),
+    /// Empty for a stable release, which outranks any prerelease of the same core.
+    prerelease: Vec<PrereleaseIdentifier>,
+}
+
+impl ReleaseVersion {
+    fn is_prerelease(&self) -> bool {
+        !self.prerelease.is_empty()
+    }
+}
+
+impl Ord for ReleaseVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.core.cmp(&other.core).then_with(|| {
+            match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => self.prerelease.cmp(&other.prerelease),
+            }
+        })
+    }
+}
+
+impl PartialOrd for ReleaseVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Numeric identifiers rank below alphanumeric ones, so the variant order here
+/// is what gives `1` < `alpha`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PrereleaseIdentifier {
+    Numeric(u64),
+    Alphanumeric(String),
+}
+
+fn release_version(value: &str) -> Option<ReleaseVersion> {
+    let value = value.trim().trim_start_matches('v');
+    let value = value.split('+').next()?;
+    let (core, prerelease) = value
+        .split_once('-')
+        .map_or((value, None), |(core, rest)| (core, Some(rest)));
+    let mut components = core.split('.');
+    let core = (
         components.next()?.parse().ok()?,
         components.next()?.parse().ok()?,
         components.next()?.parse().ok()?,
     );
-    components.next().is_none().then_some(version)
+    if components.next().is_some() {
+        return None;
+    }
+    let prerelease = match prerelease {
+        None => Vec::new(),
+        Some(prerelease) => prerelease
+            .split('.')
+            .map(|identifier| match identifier {
+                "" => None,
+                digits if digits.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    digits.parse().ok().map(PrereleaseIdentifier::Numeric)
+                }
+                other
+                    if other
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') =>
+                {
+                    Some(PrereleaseIdentifier::Alphanumeric(other.to_owned()))
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?,
+    };
+    Some(ReleaseVersion { core, prerelease })
 }
 
 fn default_media_profile(kind: MediaKind) -> QualityProfile {
@@ -5257,8 +5359,128 @@ mod tests {
     #[test]
     fn release_versions_compare_numerically() {
         assert!(release_version("v0.10.0") > release_version("0.9.9"));
-        assert_eq!(release_version("v1.2.3"), Some((1, 2, 3)));
+        assert_eq!(
+            release_version("v1.2.3").map(|version| version.core),
+            Some((1, 2, 3))
+        );
         assert_eq!(release_version("not-a-version"), None);
+        assert_eq!(release_version("1.2"), None);
+        assert_eq!(release_version("1.2.3.4"), None);
+        assert_eq!(release_version("1.2.3-"), None);
+    }
+
+    #[test]
+    fn release_versions_order_prereleases() {
+        // The whole point of the alpha line: consecutive prereleases must differ.
+        assert!(release_version("v0.1.0-alpha.4") > release_version("v0.1.0-alpha.3"));
+        assert!(release_version("v0.1.0-alpha.10") > release_version("v0.1.0-alpha.9"));
+        assert!(release_version("v0.1.0-beta.1") > release_version("v0.1.0-alpha.9"));
+        // A stable release outranks any prerelease of the same core version.
+        assert!(release_version("v0.1.0") > release_version("v0.1.0-beta.1"));
+        assert!(release_version("v0.2.0-alpha.1") > release_version("v0.1.0"));
+        // Build metadata is ignored, and more identifiers outrank fewer.
+        assert_eq!(release_version("v1.0.0+build.5"), release_version("v1.0.0"));
+        assert!(release_version("v1.0.0-alpha.1") > release_version("v1.0.0-alpha"));
+    }
+
+    fn release_json(tag: &str, prerelease: bool, asset: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "prerelease": prerelease,
+            "draft": false,
+            "assets": [{
+                "name": asset,
+                "browser_download_url": format!("https://example.invalid/{asset}"),
+            }],
+        })
+    }
+
+    #[test]
+    fn newest_release_picks_highest_matching_asset() {
+        let releases = vec![
+            release_json(
+                "v0.1.0-alpha.3",
+                true,
+                "pptalk-v0.1.0-alpha.3-linux-x86_64.AppImage",
+            ),
+            release_json(
+                "v0.1.0-alpha.10",
+                true,
+                "pptalk-v0.1.0-alpha.10-linux-x86_64.AppImage",
+            ),
+            release_json(
+                "v0.1.0-alpha.9",
+                true,
+                "pptalk-v0.1.0-alpha.9-linux-x86_64.AppImage",
+            ),
+        ];
+        let current = release_version("0.1.0-alpha.3");
+        let newest = newest_release(&releases, "linux-x86_64.AppImage", current.as_ref())
+            .expect("a prerelease build should be offered newer prereleases");
+        assert_eq!(newest.tag, "v0.1.0-alpha.10");
+        assert!(newest.version > current.unwrap());
+    }
+
+    #[test]
+    fn newest_release_skips_releases_without_an_asset_for_this_platform() {
+        let releases = vec![
+            release_json(
+                "v0.1.0-alpha.3",
+                true,
+                "pptalk-v0.1.0-alpha.3-linux-x86_64.AppImage",
+            ),
+            release_json(
+                "v0.1.0-alpha.4",
+                true,
+                "pptalk-v0.1.0-alpha.4-windows-x86_64.exe",
+            ),
+        ];
+        let current = release_version("0.1.0-alpha.1");
+        let newest = newest_release(&releases, "linux-x86_64.AppImage", current.as_ref())
+            .expect("the Linux release should still be found");
+        assert_eq!(newest.tag, "v0.1.0-alpha.3");
+    }
+
+    #[test]
+    fn newest_release_keeps_stable_builds_off_the_prerelease_line() {
+        let releases = vec![
+            release_json("v0.1.0", false, "pptalk-v0.1.0-linux-x86_64.AppImage"),
+            release_json(
+                "v0.2.0-alpha.1",
+                true,
+                "pptalk-v0.2.0-alpha.1-linux-x86_64.AppImage",
+            ),
+        ];
+        let stable = release_version("0.1.0");
+        let newest = newest_release(&releases, "linux-x86_64.AppImage", stable.as_ref())
+            .expect("the stable release should be found");
+        assert_eq!(
+            newest.tag, "v0.1.0",
+            "a stable build must not be offered an alpha"
+        );
+
+        let alpha = release_version("0.1.0-alpha.1");
+        let newest = newest_release(&releases, "linux-x86_64.AppImage", alpha.as_ref())
+            .expect("a prerelease build should see both lines");
+        assert_eq!(newest.tag, "v0.2.0-alpha.1");
+    }
+
+    #[test]
+    fn newest_release_ignores_drafts() {
+        let mut draft = release_json("v9.9.9", false, "pptalk-v9.9.9-linux-x86_64.AppImage");
+        draft["draft"] = serde_json::Value::Bool(true);
+        let releases = vec![
+            release_json(
+                "v0.1.0-alpha.3",
+                true,
+                "pptalk-v0.1.0-alpha.3-linux-x86_64.AppImage",
+            ),
+            draft,
+        ];
+        let current = release_version("0.1.0-alpha.1");
+        let newest = newest_release(&releases, "linux-x86_64.AppImage", current.as_ref())
+            .expect("the published release should be found");
+        assert_eq!(newest.tag, "v0.1.0-alpha.3");
     }
 
     #[test]
