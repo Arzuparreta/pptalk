@@ -27,7 +27,10 @@ use pptalk_core::{
     IdentityEvent, IdentityEventKind, IdentityLog, decrypt_blob, encrypt_blob, sign_invite,
     verify_invite,
 };
-use pptalk_media::{GstMediaEngine, MediaDeviceKind, MediaEngine};
+use pptalk_media::{
+    DisplaySession, GstMediaEngine, MediaDeviceKind, MediaEngine, MediaError, VideoSurface,
+    detect_display_session,
+};
 use pptalk_mls::{MlsClient, MlsError};
 use pptalk_network::{MediaSession, PeerAddress, PeerNetwork};
 use pptalk_protocol::{
@@ -74,7 +77,11 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print build and platform capabilities.
-    Doctor,
+    Doctor {
+        /// Print a JSON report of the media capture and codec capabilities.
+        #[arg(long)]
+        media: bool,
+    },
     /// Create a local, serverless identity and stable network endpoint.
     Init {
         #[arg(long)]
@@ -439,9 +446,13 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     match Args::parse().command {
-        Command::Doctor => {
-            doctor();
-            Ok(())
+        Command::Doctor { media } => {
+            if media {
+                Box::pin(doctor_media()).await
+            } else {
+                doctor();
+                Ok(())
+            }
         }
         Command::Init {
             profile,
@@ -526,6 +537,10 @@ enum DaemonCommand {
     SelectMediaDevice {
         kind: String,
         device_id: Option<String>,
+    },
+    SetVideoWindow {
+        surface: String,
+        handle: Option<u64>,
     },
     ExportBackup {
         path: PathBuf,
@@ -699,6 +714,101 @@ fn doctor() {
     println!("transport: Iroh QUIC direct + encrypted relay fallback");
     println!("database: SQLCipher");
     println!("media: GStreamer native");
+}
+
+async fn doctor_media() -> Result<()> {
+    let engine = GstMediaEngine::new()?;
+    let capabilities = engine.capabilities().await?;
+    let cameras = capabilities
+        .devices
+        .iter()
+        .filter(|device| device.kind == MediaDeviceKind::Camera)
+        .count();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            "display_session": capabilities.display_session,
+            "encoders": capabilities.encoders,
+            "decoders": capabilities.decoders,
+            "audio_sources": capabilities.audio_sources,
+            "camera_sources": capabilities.camera_sources,
+            "screen_sources": capabilities.screen_sources,
+            "camera_devices": cameras,
+        }))?
+    );
+    Ok(())
+}
+
+/// Stable error codes for the desktop UI. Structured media failures carry
+/// their own code; generic pipeline failures are classified by kind because
+/// only that context distinguishes "camera failed" from "screen failed".
+fn media_failure_code(kind: MediaKind, error: &MediaError) -> &'static str {
+    if let Some(code) = error.code() {
+        return code;
+    }
+    match kind {
+        MediaKind::Camera => "camera_capture_failed",
+        MediaKind::Screen => "screen_capture_failed",
+        MediaKind::Voice | MediaKind::SystemAudio => "voice_capture_failed",
+    }
+}
+
+#[cfg(target_os = "linux")]
+enum ScreenPortalOutcome {
+    Stream { fd: std::os::fd::OwnedFd, node: u32 },
+    Denied(String),
+    Failed(String),
+}
+
+/// Asks xdg-desktop-portal for one screen/window stream. The dialog is
+/// native, per the no-embedded-web rule, and runs before any pipeline is
+/// built so a cancellation never surfaces as a `GStreamer` error.
+#[cfg(target_os = "linux")]
+async fn negotiate_screen_portal() -> ScreenPortalOutcome {
+    use ashpd::desktop::screencast::Screencast;
+    let proxy = match Screencast::new().await {
+        Ok(proxy) => proxy,
+        Err(error) => return ScreenPortalOutcome::Failed(error.to_string()),
+    };
+    match negotiate_screen_portal_inner(&proxy).await {
+        Ok((fd, node)) => ScreenPortalOutcome::Stream { fd, node },
+        Err(error) => match &error {
+            ashpd::Error::Response(response_error) => {
+                ScreenPortalOutcome::Denied(format!("{response_error:?}"))
+            }
+            other => ScreenPortalOutcome::Failed(other.to_string()),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn negotiate_screen_portal_inner(
+    proxy: &ashpd::desktop::screencast::Screencast<'_>,
+) -> std::result::Result<(std::os::fd::OwnedFd, u32), ashpd::Error> {
+    use ashpd::desktop::{
+        PersistMode,
+        screencast::{CursorMode, SourceType},
+    };
+    let session = proxy.create_session().await?;
+    proxy
+        .select_sources(
+            &session,
+            CursorMode::Metadata,
+            SourceType::Monitor | SourceType::Window,
+            true,
+            None,
+            PersistMode::DoNot,
+        )
+        .await?;
+    let response = proxy.start(&session, None).await?.response()?;
+    let Some(stream) = response.streams().first() else {
+        return Err(ashpd::Error::Response(
+            ashpd::desktop::ResponseError::Cancelled,
+        ));
+    };
+    let fd = proxy.open_pipe_wire_remote(&session).await?;
+    Ok((fd, stream.pipe_wire_node_id()))
 }
 
 fn initialize(path: &Path, name: String, mailbox_url: Option<Url>) -> Result<()> {
@@ -1268,7 +1378,8 @@ async fn daemon(path: &Path) -> Result<()> {
                             "event":"media_capabilities", "devices":devices,
                             "encoders":capabilities.encoders,
                             "decoders":capabilities.decoders,
-                            "zero_copy":capabilities.zero_copy_backends
+                            "zero_copy":capabilities.zero_copy_backends,
+                            "display_session":capabilities.display_session
                         }))?;
                     }
                     DaemonCommand::TestMicrophone => {
@@ -1327,6 +1438,30 @@ async fn daemon(path: &Path) -> Result<()> {
                             Ok(()) => emit_json(&serde_json::json!({
                                 "event":"media_device_selected", "kind":kind_name(kind),
                                 "device_id":device_id
+                            }))?,
+                            Err(error) => emit_json(&serde_json::json!({
+                                "event":"error", "message":error.to_string()
+                            }))?,
+                        }
+                    }
+                    DaemonCommand::SetVideoWindow { surface, handle } => {
+                        let surface = match surface.as_str() {
+                            "remote_camera" => VideoSurface::RemoteCamera,
+                            "remote_screen" => VideoSurface::RemoteScreen,
+                            "local_preview" => VideoSurface::LocalPreview,
+                            _ => {
+                                emit_json(&serde_json::json!({
+                                    "event":"error",
+                                    "message":"unsupported video surface"
+                                }))?;
+                                continue;
+                            }
+                        };
+                        match media.set_video_window(surface, handle).await {
+                            Ok(()) => emit_json(&serde_json::json!({
+                                "event":"video_window_set",
+                                "surface":surface_name(surface),
+                                "attached":handle.is_some()
                             }))?,
                             Err(error) => emit_json(&serde_json::json!({
                                 "event":"error", "message":error.to_string()
@@ -2324,6 +2459,45 @@ async fn daemon(path: &Path) -> Result<()> {
                         };
                         let recipients = call.recipients.clone();
                         if enabled {
+                            #[cfg(target_os = "linux")]
+                            if kind == MediaKind::Screen
+                                && detect_display_session(
+                                    std::env::var_os("DISPLAY").is_some(),
+                                    std::env::var_os("WAYLAND_DISPLAY").is_some(),
+                                ) == DisplaySession::Wayland
+                                && std::env::var_os("PPTALK_FAKE_VIDEO_SRC").is_none()
+                            {
+                                match negotiate_screen_portal().await {
+                                    ScreenPortalOutcome::Stream { fd, node } => {
+                                        if let Err(error) =
+                                            media.set_screen_portal_stream(fd, node).await
+                                        {
+                                            emit_json(&serde_json::json!({
+                                                "event":"error",
+                                                "code":"portal_failed",
+                                                "message":error.to_string()
+                                            }))?;
+                                            continue;
+                                        }
+                                    }
+                                    ScreenPortalOutcome::Denied(reason) => {
+                                        emit_json(&serde_json::json!({
+                                            "event":"error",
+                                            "code":"portal_denied",
+                                            "message":reason
+                                        }))?;
+                                        continue;
+                                    }
+                                    ScreenPortalOutcome::Failed(reason) => {
+                                        emit_json(&serde_json::json!({
+                                            "event":"error",
+                                            "code":"portal_failed",
+                                            "message":reason
+                                        }))?;
+                                        continue;
+                                    }
+                                }
+                            }
                             let quality = requested.unwrap_or_else(|| default_media_profile(kind));
                             match media.publish(kind, quality.clone()).await {
                                 Ok(()) => {
@@ -2384,7 +2558,15 @@ async fn daemon(path: &Path) -> Result<()> {
                                     media_tasks.push((kind, task));
                                     emit_json(&serde_json::json!({"event":"media_changed", "kind":kind, "enabled":true}))?;
                                 }
-                                Err(error) => emit_json(&serde_json::json!({"event":"error", "message":error.to_string()}))?,
+                                Err(error) => {
+                                    let code = media_failure_code(kind, &error);
+                                    tracing::warn!(%code, kind = ?kind, %error, "media publish failed");
+                                    emit_json(&serde_json::json!({
+                                        "event":"error",
+                                        "code":code,
+                                        "message":error.to_string()
+                                    }))?;
+                                }
                             }
                         } else {
                             if let Some(index) = media_tasks.iter().position(|(active, _)| *active == kind) {
@@ -4565,6 +4747,14 @@ const fn kind_name(kind: MediaDeviceKind) -> &'static str {
     }
 }
 
+const fn surface_name(surface: VideoSurface) -> &'static str {
+    match surface {
+        VideoSurface::RemoteCamera => "remote_camera",
+        VideoSurface::RemoteScreen => "remote_screen",
+        VideoSurface::LocalPreview => "local_preview",
+    }
+}
+
 async fn link_device(path: &Path, label: &str) -> Result<()> {
     let mut profile = load_profile(path)?;
     let network = PeerNetwork::start_with_secret(profile.network_secret).await?;
@@ -5316,6 +5506,43 @@ mod tests {
 
     fn temporary_profile(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pptalk-cli-{label}-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn media_failure_codes_are_stable_per_kind() {
+        assert_eq!(
+            media_failure_code(MediaKind::Camera, &MediaError::NoCameraDevice),
+            "no_camera_device"
+        );
+        assert_eq!(
+            media_failure_code(MediaKind::Screen, &MediaError::NoDisplaySession),
+            "no_display_session"
+        );
+        assert_eq!(
+            media_failure_code(MediaKind::Screen, &MediaError::PortalUnavailable),
+            "portal_unavailable"
+        );
+        assert_eq!(
+            media_failure_code(
+                MediaKind::Camera,
+                &MediaError::Pipeline("Element failed to change its state".into())
+            ),
+            "camera_capture_failed"
+        );
+        assert_eq!(
+            media_failure_code(
+                MediaKind::Screen,
+                &MediaError::Pipeline("Element failed to change its state".into())
+            ),
+            "screen_capture_failed"
+        );
+        assert_eq!(
+            media_failure_code(
+                MediaKind::Voice,
+                &MediaError::Pipeline("Element failed to change its state".into())
+            ),
+            "voice_capture_failed"
+        );
     }
 
     #[test]
