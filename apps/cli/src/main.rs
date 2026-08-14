@@ -2620,10 +2620,16 @@ async fn daemon(path: &Path) -> Result<()> {
             }
             Some(event) = media_task_receiver.recv() => {
                 let MediaTaskEvent::Failed { kind, message } = event;
-                if let Some(index) = media_tasks.iter().position(|(active, _)| *active == kind) {
-                    let (_, task) = media_tasks.swap_remove(index);
-                    task.abort();
-                }
+                // An aborted task can still report one last failure racing the
+                // unpublish that stopped it; the kind is already off, so a
+                // stale event must not resurface as a user-facing error.
+                let Some(index) = media_tasks.iter().position(|(active, _)| *active == kind)
+                else {
+                    tracing::debug!(?kind, %message, "ignoring stale media task failure");
+                    continue;
+                };
+                let (_, task) = media_tasks.swap_remove(index);
+                task.abort();
                 media.unpublish(kind).await.ok();
                 emit_json(&serde_json::json!({
                     "event":"media_changed", "kind":kind, "enabled":false
