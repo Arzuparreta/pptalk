@@ -448,10 +448,12 @@ impl GstMediaEngine {
     fn portal_ready(&self) -> bool {
         self.screen_portal
             .lock()
-            .map(|portal| portal.is_some())
-            .unwrap_or(false)
+            .is_ok_and(|portal| portal.is_some())
     }
 
+    // Stubs below mirror the Linux signatures; the receiver exists so call
+    // sites never need platform conditionals.
+    #[allow(clippy::unused_self)]
     #[cfg(not(target_os = "linux"))]
     const fn portal_ready(&self) -> bool {
         false
@@ -481,6 +483,7 @@ impl GstMediaEngine {
 
     /// The portal path only exists on Linux; the routing table never returns
     /// `PipeWirePortal` elsewhere, so this arm is unreachable in practice.
+    #[allow(clippy::unused_self)]
     #[cfg(not(target_os = "linux"))]
     fn portal_source(&self) -> Result<gst::Element, MediaError> {
         Err(MediaError::PortalUnavailable)
