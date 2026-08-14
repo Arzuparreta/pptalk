@@ -100,7 +100,9 @@ SectionCard {
         IconButton {
             visible: App.callState !== "held"
             iconName: "camera"
-            description: App.cameraEnabled ? "Apagar cámara" : "Encender cámara"
+            enabled: App.hasCamera || App.cameraEnabled
+            description: !App.hasCamera && !App.cameraEnabled ? "No se detectó ninguna cámara"
+                : App.cameraEnabled ? "Apagar cámara" : "Encender cámara"
             active: App.cameraEnabled
             onClicked: App.toggleCamera()
         }

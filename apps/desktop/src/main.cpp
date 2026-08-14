@@ -1,5 +1,7 @@
 #include "AppController.hpp"
 
+#include <cstdio>
+
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QLocalServer>
@@ -66,10 +68,16 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
     QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app,
                      [](const QList<QQmlError> &warnings) {
-        for (const auto &warning : warnings) qWarning().noquote() << warning.toString();
+        for (const auto &warning : warnings) {
+            std::fprintf(stderr, "QML warning: %s\n", qPrintable(warning.toString()));
+        }
     });
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
-                     [] { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
+                     [](const QUrl &url) {
+        std::fprintf(stderr, "QML object creation failed for %s\n",
+                     qPrintable(url.toString()));
+        QCoreApplication::exit(-1);
+    }, Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("Pptalk"), QStringLiteral("Main"));
     if (!engine.rootObjects().isEmpty()) {
         if (auto *window = qobject_cast<QWindow *>(engine.rootObjects().constFirst())) {
