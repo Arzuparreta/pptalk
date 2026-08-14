@@ -27,10 +27,9 @@ use pptalk_core::{
     IdentityEvent, IdentityEventKind, IdentityLog, decrypt_blob, encrypt_blob, sign_invite,
     verify_invite,
 };
-use pptalk_media::{
-    DisplaySession, GstMediaEngine, MediaDeviceKind, MediaEngine, MediaError, VideoSurface,
-    detect_display_session,
-};
+#[cfg(target_os = "linux")]
+use pptalk_media::{DisplaySession, detect_display_session};
+use pptalk_media::{GstMediaEngine, MediaDeviceKind, MediaEngine, MediaError, VideoSurface};
 use pptalk_mls::{MlsClient, MlsError};
 use pptalk_network::{MediaSession, PeerAddress, PeerNetwork};
 use pptalk_protocol::{

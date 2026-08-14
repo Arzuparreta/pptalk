@@ -1,10 +1,9 @@
 //! Native `GStreamer` media discovery, strict quality policy and capture pipelines.
 
-use std::{
-    collections::BTreeMap,
-    os::fd::{AsRawFd, OwnedFd},
-    sync::Mutex,
-};
+use std::{collections::BTreeMap, sync::Mutex};
+
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, OwnedFd};
 
 use async_trait::async_trait;
 use gst::prelude::*;
@@ -291,6 +290,7 @@ pub trait MediaEngine: Send + Sync {
     /// Provides the `PipeWire` stream negotiated through the desktop portal so
     /// the next screen publish on Wayland can use it. The engine keeps the fd
     /// alive for as long as it may be needed.
+    #[cfg(target_os = "linux")]
     async fn set_screen_portal_stream(&self, fd: OwnedFd, node: u32) -> Result<(), MediaError>;
 }
 
@@ -309,6 +309,7 @@ struct ReceiverPipeline {
     video_sink: Option<gst::Element>,
 }
 
+#[cfg(target_os = "linux")]
 struct ScreenPortalStream {
     fd: OwnedFd,
     node: u32,
@@ -322,6 +323,7 @@ pub struct GstMediaEngine {
     receive_volumes: Mutex<BTreeMap<DeviceId, f64>>,
     selected_devices: Mutex<BTreeMap<MediaDeviceKind, String>>,
     video_windows: Mutex<BTreeMap<VideoSurface, u64>>,
+    #[cfg(target_os = "linux")]
     screen_portal: Mutex<Option<ScreenPortalStream>>,
     stats: Mutex<MediaStats>,
 }
@@ -343,6 +345,7 @@ impl GstMediaEngine {
             receive_volumes: Mutex::new(BTreeMap::new()),
             selected_devices: Mutex::new(BTreeMap::new()),
             video_windows: Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
             screen_portal: Mutex::new(None),
             stats: Mutex::new(MediaStats::default()),
         })
@@ -440,6 +443,49 @@ impl GstMediaEngine {
         })
     }
 
+    /// True when a portal-negotiated `PipeWire` stream is available.
+    #[cfg(target_os = "linux")]
+    fn portal_ready(&self) -> bool {
+        self.screen_portal
+            .lock()
+            .map(|portal| portal.is_some())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    const fn portal_ready(&self) -> bool {
+        false
+    }
+
+    /// Builds the `pipewiresrc` bound to the negotiated portal stream. The fd
+    /// is cloned so the stored stream survives pipeline retries.
+    #[cfg(target_os = "linux")]
+    fn portal_source(&self) -> Result<gst::Element, MediaError> {
+        let guard = self
+            .screen_portal
+            .lock()
+            .map_err(|_| MediaError::Poisoned)?;
+        let stream = guard.as_ref().ok_or(MediaError::PortalUnavailable)?;
+        let fd = stream
+            .fd
+            .try_clone()
+            .map_err(|error| MediaError::PortalFailed(error.to_string()))?;
+        gst::ElementFactory::make("pipewiresrc")
+            .name("portal_screen_source")
+            .property("fd", i64::from(fd.as_raw_fd()))
+            .property("path", stream.node.to_string())
+            .property("always-zero-timestamps", true)
+            .build()
+            .map_err(|error| MediaError::Pipeline(error.to_string()))
+    }
+
+    /// The portal path only exists on Linux; the routing table never returns
+    /// `PipeWirePortal` elsewhere, so this arm is unreachable in practice.
+    #[cfg(not(target_os = "linux"))]
+    fn portal_source(&self) -> Result<gst::Element, MediaError> {
+        Err(MediaError::PortalUnavailable)
+    }
+
     /// The encode chain shared by camera and screen. `preview_tail` appends a
     /// small raw preview branch behind a tee when the desktop attached a local
     /// preview window.
@@ -524,22 +570,9 @@ impl GstMediaEngine {
                     return Self::launch_capture(&description, preview_tail);
                 }
                 let session = Self::environment_display_session();
-                let portal_stream = self
-                    .screen_portal
-                    .lock()
-                    .map_err(|_| MediaError::Poisoned)?
-                    .as_ref()
-                    .and_then(|stream| {
-                        stream
-                            .fd
-                            .try_clone()
-                            .map(|fd| (fd, stream.node))
-                            .map_err(|error| error.to_string())
-                            .ok()
-                    });
                 let plan = decide_screen_capture_source(
                     session,
-                    Self::screen_capture_availability(portal_stream.is_some()),
+                    Self::screen_capture_availability(self.portal_ready()),
                 )?;
                 let chain = Self::encode_chain(profile, preview_tail)?;
                 match plan {
@@ -559,16 +592,7 @@ impl GstMediaEngine {
                         Self::launch_capture(&description, preview_tail)
                     }
                     ScreenCapturePlan::PipeWirePortal => {
-                        let Some((fd, node)) = portal_stream else {
-                            return Err(MediaError::PortalUnavailable);
-                        };
-                        let source = gst::ElementFactory::make("pipewiresrc")
-                            .name("portal_screen_source")
-                            .property("fd", i64::from(fd.as_raw_fd()))
-                            .property("path", node.to_string())
-                            .property("always-zero-timestamps", true)
-                            .build()
-                            .map_err(|error| MediaError::Pipeline(error.to_string()))?;
+                        let source = self.portal_source()?;
                         Self::pipeline_from_source(&source, &chain, preview_tail)
                     }
                 }
@@ -922,14 +946,9 @@ impl MediaEngine for GstMediaEngine {
                     }
                 }
                 MediaKind::Screen => {
-                    let portal_ready = self
-                        .screen_portal
-                        .lock()
-                        .map_err(|_| MediaError::Poisoned)?
-                        .is_some();
                     decide_screen_capture_source(
                         Self::environment_display_session(),
-                        Self::screen_capture_availability(portal_ready),
+                        Self::screen_capture_availability(self.portal_ready()),
                     )?;
                 }
                 MediaKind::Voice | MediaKind::SystemAudio => {}
@@ -1121,6 +1140,7 @@ impl MediaEngine for GstMediaEngine {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     async fn set_screen_portal_stream(&self, fd: OwnedFd, node: u32) -> Result<(), MediaError> {
         *self
             .screen_portal
