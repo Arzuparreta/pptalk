@@ -24,6 +24,7 @@ repository = "https://github.com/Arzuparreta/pptalk"
 [workspace.dependencies]
 anyhow = "1.0.100"
 argon2 = "0.5.3"
+ashpd = { version = "0.11.0", default-features = false, features = ["tokio"] }
 async-trait = "0.1.89"
 axum = "0.8.8"
 base64 = "0.22.1"
@@ -37,6 +38,7 @@ ed25519-dalek = { version = "2.2.0", features = ["rand_core", "serde"] }
 futures-util = "0.3.31"
 gstreamer = "0.24.4"
 gstreamer-app = "0.24.4"
+gstreamer-video = "0.24.4"
 hex = "0.4.3"
 iroh = { version = "1.0.3", default-features = false, features = ["tls-ring", "portmapper"] }
 openmls = { git = "https://github.com/openmls/openmls.git", rev = "65396d8ed3121506d1b9c7d0e6ec9fce1bed486d", features = ["openmls_rust_crypto"] }
@@ -60,7 +62,9 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` instead of `forbid` so the single audited GStreamer overlay call in
+# pptalk-media can carry a local #[allow] with a safety justification.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
