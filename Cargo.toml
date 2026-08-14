@@ -15,7 +15,7 @@ exclude = ["crates/distributed"]
 [workspace.package]
 # Source of truth for releases: pushing main with a new value here creates the
 # matching v<version> tag and publishes its artifacts. See .github/workflows/release.yml.
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.91"
 authors = ["pptalk contributors"]
