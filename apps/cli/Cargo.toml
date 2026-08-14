@@ -34,6 +34,7 @@ url.workspace = true
 uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
 keyring = { version = "3.6.3", features = ["sync-secret-service"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

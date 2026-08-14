@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import socket
 import subprocess
@@ -59,7 +60,10 @@ class Node:
 
 
 class Peer:
-    def __init__(self, binary: Path, profile: Path) -> None:
+    def __init__(self, binary: Path, profile: Path, env_overrides: dict[str, str] | None = None) -> None:
+        environment = dict(os.environ)
+        if env_overrides:
+            environment.update(env_overrides)
         self.process = subprocess.Popen(
             [str(binary), "daemon", "--profile", str(profile)],
             stdin=subprocess.PIPE,
@@ -67,6 +71,7 @@ class Peer:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=environment,
         )
         self.events: queue.Queue[dict] = queue.Queue()
         self.pending: list[dict] = []
@@ -177,7 +182,19 @@ def main() -> None:
                 check=True,
                 stdout=subprocess.DEVNULL,
             )
-        alice, bob = Peer(binary, alice_profile), Peer(binary, bob_profile)
+        # Alice publishes synthetic media so the whole encode, transport and
+        # receive loop stays deterministic on headless CI runners; Bob stays
+        # real so capture failures classify through the same path users hit.
+        alice = Peer(
+            binary,
+            alice_profile,
+            env_overrides={
+                "PPTALK_FAKE_VIDEO_SRC": "1",
+                "PPTALK_FAKE_AUDIO_SRC": "1",
+                "PPTALK_HEADLESS_PLAYBACK": "1",
+            },
+        )
+        bob = Peer(binary, bob_profile, env_overrides={"PPTALK_HEADLESS_PLAYBACK": "1"})
         peers.extend((alice, bob))
         try:
             alice.event("ready")
@@ -321,6 +338,112 @@ def main() -> None:
             alice.send({"command": "resume_call", "call_id": ringing_call["call_id"]})
             alice.event("call_resumed")
             bob.event("call_remote_resumed")
+
+            # Media publishing. Bob probes first and must hit the honest
+            # failure path (no camera, no graphical session on headless CI)
+            # with a structured code instead of raw pipeline jargon.
+            def media_outcome(peer: Peer, contact: str, call_id: str, kind: str) -> dict:
+                peer.send(
+                    {
+                        "command": "set_media",
+                        "contact": contact,
+                        "call_id": call_id,
+                        "kind": kind,
+                        "enabled": True,
+                    }
+                )
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    try:
+                        event = peer.events.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                    if event.get("event") == "error" and event.get("code"):
+                        return event
+                    if (
+                        event.get("event") == "media_changed"
+                        and event.get("kind") == kind
+                        and event.get("enabled") is True
+                    ):
+                        return event
+                    peer.pending.append(event)
+                raise RuntimeError(f"no media outcome for {kind}")
+
+            def stop_media(peer: Peer, contact: str, call_id: str, kind: str) -> None:
+                peer.send(
+                    {
+                        "command": "set_media",
+                        "contact": contact,
+                        "call_id": call_id,
+                        "kind": kind,
+                        "enabled": False,
+                    }
+                )
+                peer.event(
+                    "media_changed",
+                    lambda event: event.get("kind") == kind and event.get("enabled") is False,
+                )
+
+            bob_camera = media_outcome(bob, "Alice", ringing_call["call_id"], "camera")
+            if bob_camera.get("event") == "media_changed":
+                stop_media(bob, "Alice", ringing_call["call_id"], "camera")
+            elif bob_camera.get("code") not in ("no_camera_device", "camera_capture_failed"):
+                raise RuntimeError(f"unclassified camera failure: {bob_camera}")
+            bob_screen = media_outcome(bob, "Alice", ringing_call["call_id"], "screen")
+            if bob_screen.get("event") == "media_changed":
+                stop_media(bob, "Alice", ringing_call["call_id"], "screen")
+            elif bob_screen.get("code") not in (
+                "no_display_session",
+                "no_screen_backend",
+                "screen_capture_failed",
+                "portal_unavailable",
+                "portal_denied",
+                "portal_failed",
+            ):
+                raise RuntimeError(f"unclassified screen failure: {bob_screen}")
+
+            alice.send(
+                {"command": "set_video_window", "surface": "local_preview", "handle": None}
+            )
+            alice.event("video_window_set", lambda event: event.get("surface") == "local_preview")
+
+            # Alice drives the deterministic synthetic loop: publish, remote
+            # signal, datagram delivery without receiver errors, unpublish.
+            for kind in ("voice", "camera", "screen"):
+                alice.send(
+                    {
+                        "command": "set_media",
+                        "contact": "Bob",
+                        "call_id": ringing_call["call_id"],
+                        "kind": kind,
+                        "enabled": True,
+                    }
+                )
+                alice.event(
+                    "media_changed",
+                    lambda event, expected=kind: event.get("kind") == expected
+                    and event.get("enabled") is True,
+                    timeout=30,
+                )
+                bob.event(
+                    "remote_media",
+                    lambda event, expected=kind: event.get("signal", {})
+                    .get("Publish", {})
+                    .get("kind")
+                    == expected,
+                    timeout=30,
+                )
+            bob.assert_no_event("error", duration=3)
+            for kind in ("voice", "camera", "screen"):
+                stop_media(alice, "Bob", ringing_call["call_id"], kind)
+                bob.event(
+                    "remote_media",
+                    lambda event, expected=kind: event.get("signal", {})
+                    .get("Unpublish", {})
+                    .get("kind")
+                    == expected,
+                )
+
             bob.send(
                 {
                     "command": "leave_call",
@@ -595,7 +718,8 @@ def main() -> None:
 
     print(
         "pptalk e2e smoke: symmetric contacts, direct files, cancellation, replies, "
-        "edits, calls, reconnect, MLS files, history sync, multi-device, revocation "
+        "edits, calls, classified media failures, synthetic media loop, "
+        "reconnect, MLS files, history sync, multi-device, revocation "
         "and mailbox store-and-forward passed"
     )
 

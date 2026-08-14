@@ -45,7 +45,22 @@ cargo audit
 ```
 
 El smoke test usa procesos reales y cubre reconexión, outbox, sincronización
-causal MLS, archivos de grupo, llamadas, segundo dispositivo y revocación.
+causal MLS, archivos de grupo, llamadas, fallos de medios clasificados, el
+bucle completo de publicación de medios con fuentes sintéticas, segundo
+dispositivo y revocación.
+
+Los medios se prueban con dos variables de entorno que solo usa el motor
+`GStreamer` cuando están presentes:
+
+- `PPTALK_FAKE_VIDEO_SRC`/`PPTALK_FAKE_AUDIO_SRC` sustituyen cámara, pantalla
+  y micrófono por `videotestsrc`/`audiotestsrc`, de modo que codificar,
+  transportar y recibir es determinista en un runner sin hardware.
+- `PPTALK_HEADLESS_PLAYBACK` reemplaza los sinks de reproducción por
+  `fakesink` para que un demonio sin escritorio no intente abrir ventanas.
+
+`pptalk-cli doctor --media` imprime un informe JSON de códecs, fuentes y
+dispositivos; los workflows de release lo ejecutan contra el artefacto ya
+empaquetado para detectar un bundle roto antes de publicarlo.
 
 ## Cliente nativo
 

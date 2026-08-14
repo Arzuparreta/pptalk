@@ -90,7 +90,8 @@ jobs:
           libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           gstreamer1.0-plugins-base gstreamer1.0-plugins-good
           gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-          gstreamer1.0-libav gstreamer1.0-pulseaudio gstreamer1.0-tools
+          gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio
+          gstreamer1.0-tools
       - name: Install AppImage tools
         shell: bash
         run: |
@@ -118,6 +119,25 @@ jobs:
           status="$?"
           set -e
           test "$status" -eq 124
+      - name: Verify bundled media capabilities
+        shell: bash
+        run: |
+          root="$PWD/squashfs-root"
+          export LD_LIBRARY_PATH="$root/usr/lib:$root/usr/lib/x86_64-linux-gnu"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$root/usr/lib/gstreamer-1.0"
+          export GST_PLUGIN_SCANNER="$root/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+          report="$("$root/usr/bin/pptalk-cli" doctor --media)"
+          printf '%s\n' "$report"
+          python3 -c '
+          import json, sys
+          report = json.loads(sys.argv[1])
+          problems = []
+          for key in ("encoders", "decoders", "audio_sources", "camera_sources", "screen_sources"):
+              if not report.get(key):
+                  problems.append(key)
+          if problems:
+              raise SystemExit(f"bundled GStreamer is missing capabilities: {problems}")
+          ' "$report"
       - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
@@ -179,13 +199,27 @@ jobs:
           $Process = Start-Process -PassThru -FilePath "$InstallDir/pptalk-desktop.exe"
           Start-Sleep -Seconds 8
           if ($Process.HasExited) {
-            throw "pptalk-desktop exited during the startup smoke test with code $($Process.ExitCode)"
+              throw "pptalk-desktop exited during the startup smoke test with code $($Process.ExitCode)"
           }
           $Child = Get-CimInstance Win32_Process |
               Where-Object { $_.ParentProcessId -eq $Process.Id -and $_.Name -eq "pptalk-cli.exe" }
           if (-not $Child) { throw "The installed desktop did not start its local daemon" }
           Stop-Process -Id $Process.Id
           $Child | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
+      - name: Verify installed media capabilities
+        shell: pwsh
+        run: |
+          $InstallDir = Join-Path $env:RUNNER_TEMP "pptalk-installed"
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = Join-Path $InstallDir "lib/gstreamer-1.0"
+          $env:GST_PLUGIN_SCANNER = Join-Path $InstallDir "libexec/gstreamer-1.0/gst-plugin-scanner.exe"
+          $report = (& "$InstallDir/pptalk-cli.exe" doctor --media | ConvertFrom-Json)
+          $report | ConvertTo-Json -Depth 4
+          foreach ($key in @("encoders", "decoders", "audio_sources", "camera_sources", "screen_sources")) {
+              $value = $report.$key
+              if (-not $value -or $value.Count -eq 0) {
+                  throw "Installed GStreamer is missing capability: $key"
+              }
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: windows

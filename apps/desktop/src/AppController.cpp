@@ -25,6 +25,7 @@
 #include <QTimer>
 #include <QVariantMap>
 #include <QWindow>
+#include <QQuickWindow>
 #include <algorithm>
 
 namespace {
@@ -128,6 +129,12 @@ AppController::AppController(QObject *parent)
     configureVideoQuality(m_videoQualityPreset);
     if (m_voiceMode != QStringLiteral("push_to_talk")) m_voiceMode = QStringLiteral("open");
     qApp->installEventFilter(this);
+    m_videoSyncTimer = new QTimer(this);
+    m_videoSyncTimer->setInterval(120);
+    connect(m_videoSyncTimer, &QTimer::timeout, this, &AppController::syncVideoSurfaces);
+    m_videoSurfaces.insert(QStringLiteral("remote_camera"), {});
+    m_videoSurfaces.insert(QStringLiteral("remote_screen"), {});
+    m_videoSurfaces.insert(QStringLiteral("local_preview"), {});
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         m_tray = new QSystemTrayIcon(QIcon::fromTheme(QStringLiteral("dialog-information")), this);
         m_tray->setToolTip(QStringLiteral("pptalk"));
@@ -314,6 +321,9 @@ QString AppController::callContact() const
 bool AppController::microphoneEnabled() const { return m_microphoneEnabled; }
 bool AppController::cameraEnabled() const { return m_cameraEnabled; }
 bool AppController::sharingScreen() const { return m_sharingScreen; }
+bool AppController::remoteCamera() const { return m_remoteCamera; }
+bool AppController::remoteScreen() const { return m_remoteScreen; }
+bool AppController::hasCamera() const { return m_hasCamera; }
 bool AppController::incomingCallPending() const { return !m_pendingCallId.isEmpty(); }
 bool AppController::incomingCallRinging() const { return m_pendingCallRinging; }
 QString AppController::incomingCallContact() const { return m_pendingCallContact; }
@@ -1100,9 +1110,14 @@ void AppController::setPushToTalkShortcut(const QString &shortcut)
 
 bool AppController::eventFilter(QObject *watched, QEvent *event)
 {
-    Q_UNUSED(watched);
+    const auto type = event->type();
+    if ((type == QEvent::Move || type == QEvent::Resize || type == QEvent::Expose ||
+         type == QEvent::ScreenChangeInternal) &&
+        watched->isWindowType()) {
+        syncVideoSurfaces();
+    }
     if (!m_callActive || m_voiceMode != QStringLiteral("push_to_talk")) return false;
-    if (event->type() == QEvent::KeyPress) {
+    if (type == QEvent::KeyPress) {
         const auto *key = static_cast<QKeyEvent *>(event);
         const auto matches = m_pushToTalkShortcut == QStringLiteral("F8")
             ? key->key() == Qt::Key_F8
@@ -1116,7 +1131,7 @@ bool AppController::eventFilter(QObject *watched, QEvent *event)
             setMedia(QStringLiteral("voice"), true);
             return true;
         }
-    } else if (event->type() == QEvent::KeyRelease) {
+    } else if (type == QEvent::KeyRelease) {
         const auto *key = static_cast<QKeyEvent *>(event);
         const auto released = m_pushToTalkShortcut == QStringLiteral("F8")
             ? key->key() == Qt::Key_F8 : key->key() == Qt::Key_Space;
@@ -1232,6 +1247,128 @@ void AppController::setMedia(const QString &kind, const bool enabled)
     sendBackendCommand(command);
 }
 
+bool AppController::videoOverlaySupported()
+{
+    const auto platform = QGuiApplication::platformName();
+    return platform == QStringLiteral("xcb") || platform == QStringLiteral("windows");
+}
+
+void AppController::attachVideoSurface(const QString &surface, QQuickItem *item)
+{
+    if (item == nullptr || !m_videoSurfaces.contains(surface)) return;
+    auto &state = m_videoSurfaces[surface];
+    state.item = item;
+    connect(item, &QQuickItem::xChanged, this, &AppController::syncVideoSurfaces,
+            Qt::UniqueConnection);
+    connect(item, &QQuickItem::yChanged, this, &AppController::syncVideoSurfaces,
+            Qt::UniqueConnection);
+    connect(item, &QQuickItem::widthChanged, this, &AppController::syncVideoSurfaces,
+            Qt::UniqueConnection);
+    connect(item, &QQuickItem::heightChanged, this, &AppController::syncVideoSurfaces,
+            Qt::UniqueConnection);
+    connect(item, &QQuickItem::visibleChanged, this, &AppController::syncVideoSurfaces,
+            Qt::UniqueConnection);
+    connect(item, &QQuickItem::windowChanged, this, &AppController::syncVideoSurfaces,
+            Qt::UniqueConnection);
+    if (state.window == nullptr && item->window() != nullptr && videoOverlaySupported()) {
+        state.window = new QQuickWindow(item->window());
+        state.window->setColor(Qt::black);
+    }
+    resendVideoWindow(surface);
+    syncVideoSurfaces();
+}
+
+void AppController::detachVideoSurface(const QString &surface)
+{
+    if (!m_videoSurfaces.contains(surface)) return;
+    auto &state = m_videoSurfaces[surface];
+    if (state.window != nullptr) {
+        state.window->hide();
+        state.window->deleteLater();
+    }
+    state.item.clear();
+    state.window.clear();
+    if (videoOverlaySupported()) {
+        sendBackendCommand({{QStringLiteral("command"), QStringLiteral("set_video_window")},
+                            {QStringLiteral("surface"), surface},
+                            {QStringLiteral("handle"), QVariant()}});
+    }
+}
+
+void AppController::resendVideoWindow(const QString &surface)
+{
+    if (!videoOverlaySupported()) return;
+    const auto &state = m_videoSurfaces.value(surface);
+    if (state.window == nullptr) return;
+    sendBackendCommand({{QStringLiteral("command"), QStringLiteral("set_video_window")},
+                        {QStringLiteral("surface"), surface},
+                        {QStringLiteral("handle"),
+                         static_cast<qulonglong>(state.window->winId())}});
+}
+
+void AppController::syncVideoSurfaces()
+{
+    const auto mediaActive = [this](const QString &surface) {
+        if (surface == QStringLiteral("remote_camera")) return m_remoteCamera && m_callActive;
+        if (surface == QStringLiteral("remote_screen")) return m_remoteScreen && m_callActive;
+        if (surface == QStringLiteral("local_preview")) {
+            return (m_cameraEnabled || m_sharingScreen) && m_callActive;
+        }
+        return false;
+    };
+    bool anyAttached = false;
+    for (auto iterator = m_videoSurfaces.begin(); iterator != m_videoSurfaces.end(); ++iterator) {
+        auto &state = iterator.value();
+        if (state.item == nullptr) continue;
+        anyAttached = true;
+        if (state.window == nullptr) continue;
+        const auto show = mediaActive(iterator.key()) && state.item->isVisible()
+            && state.item->width() > 1 && state.item->height() > 1;
+        if (!show) {
+            if (state.window->isVisible()) state.window->hide();
+            continue;
+        }
+        const auto position = state.item->mapToScene({0, 0});
+        state.window->setGeometry(qRound(position.x()), qRound(position.y()),
+                                  qRound(state.item->width()), qRound(state.item->height()));
+        if (!state.window->isVisible()) state.window->show();
+    }
+    if (anyAttached && !m_videoSyncTimer->isActive()) m_videoSyncTimer->start();
+    if (!anyAttached) m_videoSyncTimer->stop();
+}
+
+void AppController::clearRemoteMedia()
+{
+    m_remoteCamera = false;
+    m_remoteScreen = false;
+    syncVideoSurfaces();
+}
+
+QString AppController::mediaErrorText(const QString &code, const QString &fallback)
+{
+    if (code == QStringLiteral("no_camera_device"))
+        return QStringLiteral("No se detectó ninguna cámara conectada.");
+    if (code == QStringLiteral("camera_capture_failed"))
+        return QStringLiteral("No se pudo iniciar la cámara. Comprueba que otra aplicación "
+                              "no la esté usando.");
+    if (code == QStringLiteral("no_display_session"))
+        return QStringLiteral("No hay ninguna sesión gráfica que capturar en este equipo.");
+    if (code == QStringLiteral("no_screen_backend"))
+        return QStringLiteral("Esta instalación no tiene el complemento de captura de pantalla.");
+    if (code == QStringLiteral("screen_capture_failed"))
+        return QStringLiteral("No se pudo iniciar la captura de pantalla.");
+    if (code == QStringLiteral("portal_denied"))
+        return QStringLiteral("Permiso de pantalla denegado. Vuelve a pulsar Compartir pantalla "
+                              "para reintentarlo.");
+    if (code == QStringLiteral("portal_failed"))
+        return QStringLiteral("El portal del sistema no pudo preparar la pantalla compartida.");
+    if (code == QStringLiteral("portal_unavailable"))
+        return QStringLiteral("Se necesita tu permiso para compartir la pantalla en Wayland.");
+    if (code == QStringLiteral("voice_capture_failed"))
+        return QStringLiteral("No se pudo iniciar el micrófono.");
+    return fallback.isEmpty() ? QStringLiteral("Error inesperado.") : fallback;
+}
+
 void AppController::startBackend()
 {
     const auto dataDirectory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -1299,9 +1436,10 @@ void AppController::launchBackend()
             &AppController::processBackendOutput);
     connect(m_backend, &QProcess::readyReadStandardError, this, [this]() {
         const auto diagnostic = QString::fromUtf8(m_backend->readAllStandardError()).trimmed();
+        // Daemon diagnostics stay in the log: GStreamer warnings are common on
+        // degraded hardware and must not surface as user-facing errors.
         if (!diagnostic.isEmpty()) {
-            m_lastError = diagnostic.section(QLatin1Char('\n'), -1);
-            emit connectionChanged();
+            qWarning().noquote() << "pptalk daemon:" << diagnostic;
         }
     });
     connect(m_backend, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
@@ -1682,6 +1820,15 @@ void AppController::processBackendOutput()
                 });
             }
             m_mediaDevices = devices;
+            bool hasCamera = false;
+            for (const auto &value : devices) {
+                if (value.toMap().value(QStringLiteral("kind")).toString() ==
+                    QStringLiteral("camera")) {
+                    hasCamera = true;
+                    break;
+                }
+            }
+            m_hasCamera = hasCamera;
             emit mediaDevicesChanged();
             for (const auto &kind : {QStringLiteral("audio_input"),
                                      QStringLiteral("audio_output"),
@@ -1732,7 +1879,8 @@ void AppController::processBackendOutput()
             m_updateUrl = QUrl(object.value(QStringLiteral("url")).toString());
             emit updateChanged();
         } else if (event == QStringLiteral("error")) {
-            m_lastError = object.value(QStringLiteral("message")).toString();
+            m_lastError = mediaErrorText(object.value(QStringLiteral("code")).toString(),
+                                         object.value(QStringLiteral("message")).toString());
             // A rejected address never produces mailbox_configured, so the pending
             // status would otherwise sit there claiming it is still checking.
             if (m_mailboxPending) {
@@ -1754,6 +1902,7 @@ void AppController::processBackendOutput()
             emit settingsChanged();
             sendBackendCommand({{QStringLiteral("command"), QStringLiteral("check_update")}});
             sendBackendCommand({{QStringLiteral("command"), QStringLiteral("media_capabilities")}});
+            for (const auto &surface : m_videoSurfaces.keys()) resendVideoWindow(surface);
             emit connectionChanged();
             if (!m_startupInvite.isEmpty()) {
                 acceptInvite(m_startupInvite);
@@ -1868,6 +2017,7 @@ void AppController::processBackendOutput()
             m_pushToTalkPressed = false;
             m_microphoneEnabled = false;
             m_callParticipants.clear();
+            clearRemoteMedia();
             emit callChanged();
         } else if (event == QStringLiteral("media_changed")) {
             const auto kind = object.value(QStringLiteral("kind")).toString();
@@ -1876,6 +2026,19 @@ void AppController::processBackendOutput()
             if (kind == QStringLiteral("camera")) m_cameraEnabled = enabled;
             if (kind == QStringLiteral("screen")) m_sharingScreen = enabled;
             emit callChanged();
+            syncVideoSurfaces();
+        } else if (event == QStringLiteral("remote_media")) {
+            const auto signalObject = object.value(QStringLiteral("signal")).toObject();
+            const auto kind = signalObject.contains(QStringLiteral("Publish"))
+                ? signalObject.value(QStringLiteral("Publish")).toObject()
+                      .value(QStringLiteral("kind")).toString()
+                : signalObject.value(QStringLiteral("Unpublish")).toObject()
+                      .value(QStringLiteral("kind")).toString();
+            const auto published = signalObject.contains(QStringLiteral("Publish"));
+            if (kind == QStringLiteral("camera")) m_remoteCamera = published;
+            if (kind == QStringLiteral("screen")) m_remoteScreen = published;
+            emit callChanged();
+            syncVideoSurfaces();
         } else if (event == QStringLiteral("participant_volume")) {
             const auto deviceId = object.value(QStringLiteral("device_id")).toString();
             for (qsizetype index = 0; index < m_callParticipants.size(); ++index) {
@@ -1908,6 +2071,7 @@ void AppController::processBackendOutput()
             m_pushToTalkPressed = false;
             m_callState = object.value(QStringLiteral("outcome")).toString() == QStringLiteral("missed")
                 ? QStringLiteral("missed") : QStringLiteral("idle");
+            clearRemoteMedia();
             emit callChanged();
         }
     }

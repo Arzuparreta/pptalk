@@ -12,6 +12,7 @@ async-trait.workspace = true
 blake3.workspace = true
 gstreamer.workspace = true
 gstreamer-app.workspace = true
+gstreamer-video.workspace = true
 pptalk-protocol = { path = "../protocol" }
 thiserror.workspace = true
 tokio.workspace = true

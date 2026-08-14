@@ -342,6 +342,57 @@ ApplicationWindow {
                     onShowParticipants: callParticipantsDialog.open()
                 }
 
+                Rectangle {
+                    visible: App.callOngoing && (App.remoteScreen || App.remoteCamera)
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 18
+                    Layout.rightMargin: 18
+                    Layout.topMargin: visible ? 12 : 0
+                    Layout.preferredHeight: visible ? 320 : 0
+                    radius: Theme.radiusLarge
+                    color: "#05070B"
+                    border.color: Theme.border
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 0
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 30
+                            color: "#0D1117"
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 14
+                                anchors.rightMargin: 12
+                                spacing: 8
+                                AppIcon { name: App.remoteScreen ? "screen" : "camera"; width: 14; height: 14; color: Theme.accent }
+                                Text { text: App.remoteScreen ? "Pantalla de " + App.callContact : "Cámara de " + App.callContact; color: Theme.text; font.pixelSize: 11; font.weight: Font.DemiBold }
+                                Item { Layout.fillWidth: true }
+                                Text { text: "Vídeo cifrado de extremo a extremo"; color: Theme.textMuted; font.pixelSize: 9 }
+                            }
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            Item {
+                                id: remoteScreenRect
+                                visible: App.remoteScreen
+                                anchors.fill: parent
+                                Component.onCompleted: App.attachVideoSurface("remote_screen", remoteScreenRect)
+                            }
+                            Item {
+                                id: remoteCameraRect
+                                visible: App.remoteCamera && !App.remoteScreen
+                                anchors.fill: parent
+                                Component.onCompleted: App.attachVideoSurface("remote_camera", remoteCameraRect)
+                            }
+                        }
+                    }
+                }
+
                 Item {
                     visible: App.contacts.length === 0
                     Layout.fillWidth: true
@@ -357,54 +408,93 @@ ApplicationWindow {
                     }
                 }
 
-                ListView {
-                    id: messageList
+                Item {
                     visible: App.contacts.length > 0
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.topMargin: 12
                     Layout.bottomMargin: 6
-                    leftMargin: 12
-                    rightMargin: 12
-                    clip: true
-                    spacing: 2
-                    boundsBehavior: Flickable.StopAtBounds
-                    model: App.messages
-                    property bool followNewest: true
-                    ScrollBar.vertical: ScrollBar {}
-                    delegate: ChatBubble {
-                        required property var modelData
-                        property var replyData: window.replyInfo(modelData.replyTo)
-                        author: modelData.author
-                        body: modelData.body
-                        time: modelData.time
-                        own: modelData.own
-                        messageId: modelData.messageId
-                        delivery: modelData.delivery
-                        edited: modelData.edited
-                        deleted: modelData.deleted
-                        replyTo: modelData.replyTo
-                        filePath: modelData.filePath
-                        replyAuthor: replyData.author
-                        replyBody: replyData.body
-                        highlighted: modelData.messageId === App.focusedMessageId
-                        localDeleteAllowed: !App.conversationIsGroup
-                        onReplyRequested: id => { window.replyMessageId = id; window.editMessageId = ""; window.contextBody = body; composer.forceActiveFocus() }
-                        onEditRequested: (id, currentBody) => { window.editMessageId = id; window.replyMessageId = ""; window.contextBody = currentBody; composer.text = currentBody; composer.forceActiveFocus() }
-                        onDeleteRequested: id => App.deleteMessage(id)
-                        onDeleteLocalRequested: id => App.deleteMessageLocal(id)
-                        onOpenFileRequested: path => App.openMessageFile(path)
-                    }
-                    onMovementEnded: followNewest = atYEnd
-                    onCountChanged: if (followNewest) Qt.callLater(positionViewAtEnd)
 
-                    ColumnLayout {
-                        visible: messageList.count === 0
-                        anchors.centerIn: parent
-                        spacing: 8
-                        AppIcon { Layout.alignment: Qt.AlignHCenter; name: "lock"; width: 25; height: 25; color: Theme.textSubtle }
-                        Text { text: "Esta conversación empieza aquí"; color: Theme.text; font.pixelSize: 14; font.weight: Font.DemiBold }
-                        Text { text: "Los mensajes se cifran antes de salir de tu dispositivo."; color: Theme.textMuted; font.pixelSize: 11 }
+                    ListView {
+                        id: messageList
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        clip: true
+                        spacing: 2
+                        boundsBehavior: Flickable.StopAtBounds
+                        model: App.messages
+                        property bool followNewest: true
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: ChatBubble {
+                            required property var modelData
+                            property var replyData: window.replyInfo(modelData.replyTo)
+                            author: modelData.author
+                            body: modelData.body
+                            time: modelData.time
+                            own: modelData.own
+                            messageId: modelData.messageId
+                            delivery: modelData.delivery
+                            edited: modelData.edited
+                            deleted: modelData.deleted
+                            replyTo: modelData.replyTo
+                            filePath: modelData.filePath
+                            replyAuthor: replyData.author
+                            replyBody: replyData.body
+                            highlighted: modelData.messageId === App.focusedMessageId
+                            localDeleteAllowed: !App.conversationIsGroup
+                            onReplyRequested: id => { window.replyMessageId = id; window.editMessageId = ""; window.contextBody = body; composer.forceActiveFocus() }
+                            onEditRequested: (id, currentBody) => { window.editMessageId = id; window.replyMessageId = ""; window.contextBody = currentBody; composer.text = currentBody; composer.forceActiveFocus() }
+                            onDeleteRequested: id => App.deleteMessage(id)
+                            onDeleteLocalRequested: id => App.deleteMessageLocal(id)
+                            onOpenFileRequested: path => App.openMessageFile(path)
+                        }
+                        onMovementEnded: followNewest = atYEnd
+                        onCountChanged: if (followNewest) Qt.callLater(positionViewAtEnd)
+
+                        ColumnLayout {
+                            visible: messageList.count === 0
+                            anchors.centerIn: parent
+                            spacing: 8
+                            AppIcon { Layout.alignment: Qt.AlignHCenter; name: "lock"; width: 25; height: 25; color: Theme.textSubtle }
+                            Text { text: "Esta conversación empieza aquí"; color: Theme.text; font.pixelSize: 14; font.weight: Font.DemiBold }
+                            Text { text: "Los mensajes se cifran antes de salir de tu dispositivo."; color: Theme.textMuted; font.pixelSize: 11 }
+                        }
+                    }
+
+                    Rectangle {
+                        visible: App.callOngoing && (App.cameraEnabled || App.sharingScreen)
+                        width: 260
+                        height: visible ? 168 : 0
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 10
+                        radius: Theme.radius
+                        color: "#05070B"
+                        border.color: Theme.accent
+                        Column {
+                            anchors.fill: parent
+                            Item {
+                                width: parent.width
+                                height: 22
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: App.sharingScreen ? "Estás compartiendo pantalla" : "Tu cámara"
+                                    color: Theme.accent
+                                    font.pixelSize: 9
+                                    font.weight: Font.DemiBold
+                                }
+                            }
+                            Item {
+                                id: pipVideoRect
+                                width: parent.width
+                                height: parent.height - 22
+                                Component.onCompleted: App.attachVideoSurface("local_preview", pipVideoRect)
+                            }
+                        }
                     }
                 }
 

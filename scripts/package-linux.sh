@@ -85,6 +85,41 @@ copy_at_least_one "H.264 decoder" openh264dec avdec_h264
 for element in pulsesink pipewiresink alsasink waylandsink ximagesink xvimagesink; do
   copy_gstreamer_element "${element}" optional || true
 done
+
+# The GStreamer plugins above pull runtime libraries (pipewire, spa, X11,
+# xcb...) that linuxdeploy cannot see because nothing it scans links them.
+# Resolve the missing closure against the host so the AppImage is
+# self-contained instead of crashing on minimal systems.
+bundle_library_closure() {
+  local stage="$1"
+  local lib_dir="$stage/usr/lib"
+  local lib_dir_alt="$stage/usr/lib/x86_64-linux-gnu"
+  local excluded='^(libc\.so|libm\.so|ld-linux|libpthread|libdl|librt|libresolv|libgcc_s|libanl|libutil)'
+  local pass lib missing path
+  for pass in 1 2 3; do
+    local copied=0
+    while IFS= read -r missing; do
+      lib="${missing##*/}"
+      [[ -e "${lib_dir}/${lib}" || -e "${lib_dir_alt}/${lib}" ]] && continue
+      [[ "${lib}" =~ ${excluded} ]] && continue
+      path="$(ldconfig -p | awk -v lib="${lib}" '$1 == lib { print $NF; exit }')"
+      if [[ -z "${path}" || ! -f "${path}" ]]; then
+        printf 'cannot resolve bundled library dependency: %s\n' "${lib}" >&2
+        exit 1
+      fi
+      install -Dm755 "${path}" "${lib_dir}/${lib}"
+      copied=1
+      printf 'bundled %s\n' "${lib}"
+    done < <(
+      find "${stage}/usr/lib" -name '*.so*' -type f | while read -r candidate; do
+        LD_LIBRARY_PATH="${lib_dir}:${lib_dir_alt}" \
+          ldd "${candidate}" 2>/dev/null | awk '$2 == "=>" && $3 == "not" { print $1 }'
+      done | sort -u
+    )
+    [[ "${copied}" -eq 0 ]] && break
+  done
+}
+bundle_library_closure "${stage_dir}"
 gstreamer_scanner="$(pkg-config --variable=pluginscannerdir gstreamer-1.0)/gst-plugin-scanner"
 install -Dm755 "${gstreamer_scanner}" \
   "${stage_dir}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"

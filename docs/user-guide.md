@@ -114,6 +114,22 @@ la llamada puedes activar o desactivar:
 - cámara: **Encender cámara** o **Apagar cámara**;
 - pantalla: **Compartir pantalla** o **Dejar de compartir**.
 
+Cuando la otra persona enciende su cámara o comparte su pantalla, el vídeo
+aparece dentro de la conversación, sobre los mensajes, bajo el título
+**Pantalla de …** o **Cámara de …**. Si compartes pantalla o enciendes tu
+cámara, verás además una miniatura **Estás compartiendo pantalla** o
+**Tu cámara** en la esquina de la conversación.
+
+El botón de la cámara aparece desactivado con el aviso **No se detectó
+ninguna cámara** cuando el equipo no tiene cámara conectada. Si la cámara o
+la pantalla no pueden arrancar, verás un mensaje concreto en la franja roja de
+la conversación en lugar de un error técnico.
+
+En Linux con Wayland, la primera vez que pulses **Compartir pantalla** el
+sistema mostrará su propio diálogo para que elijas qué compartir y des el
+permiso. Si lo cancelas, puedes volver a pulsar **Compartir pantalla** para
+reintentarlo.
+
 Pulsa el botón con el número de **personas** para ver quién está conectado y
 ajustar su volumen. En
 **Ajustes** puedes elegir micrófono, auriculares y cámara, y pulsar **Probar

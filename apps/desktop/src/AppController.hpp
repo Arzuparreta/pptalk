@@ -1,12 +1,18 @@
 #pragma once
 
+#include <QMap>
 #include <QObject>
+#include <QPointer>
+#include <QQuickItem>
+#include <QQuickWindow>
 #include <QString>
 #include <QVariantList>
+#include <QWindow>
 #include <QUrl>
 
 class QProcess;
 class QSystemTrayIcon;
+class QTimer;
 class QEvent;
 
 class AppController final : public QObject
@@ -57,6 +63,9 @@ class AppController final : public QObject
     Q_PROPERTY(bool microphoneEnabled READ microphoneEnabled NOTIFY callChanged)
     Q_PROPERTY(bool cameraEnabled READ cameraEnabled NOTIFY callChanged)
     Q_PROPERTY(bool sharingScreen READ sharingScreen NOTIFY callChanged)
+    Q_PROPERTY(bool remoteCamera READ remoteCamera NOTIFY callChanged)
+    Q_PROPERTY(bool remoteScreen READ remoteScreen NOTIFY callChanged)
+    Q_PROPERTY(bool hasCamera READ hasCamera NOTIFY mediaDevicesChanged)
     Q_PROPERTY(bool incomingCallPending READ incomingCallPending NOTIFY callChanged)
     Q_PROPERTY(bool incomingCallRinging READ incomingCallRinging NOTIFY callChanged)
     Q_PROPERTY(QString incomingCallContact READ incomingCallContact NOTIFY callChanged)
@@ -119,6 +128,9 @@ public:
     [[nodiscard]] bool microphoneEnabled() const;
     [[nodiscard]] bool cameraEnabled() const;
     [[nodiscard]] bool sharingScreen() const;
+    [[nodiscard]] bool remoteCamera() const;
+    [[nodiscard]] bool remoteScreen() const;
+    [[nodiscard]] bool hasCamera() const;
     [[nodiscard]] bool incomingCallPending() const;
     [[nodiscard]] bool incomingCallRinging() const;
     [[nodiscard]] QString incomingCallContact() const;
@@ -181,6 +193,8 @@ public:
     Q_INVOKABLE void toggleMicrophone();
     Q_INVOKABLE void toggleCamera();
     Q_INVOKABLE void toggleScreenShare();
+    Q_INVOKABLE void attachVideoSurface(const QString &surface, QQuickItem *item);
+    Q_INVOKABLE void detachVideoSurface(const QString &surface);
     Q_INVOKABLE void setParticipantVolume(const QString &deviceId, double volume);
     Q_INVOKABLE void removeCurrentContact();
     Q_INVOKABLE void setCurrentContactBlocked(bool blocked);
@@ -234,6 +248,17 @@ private:
     void showNotification(const QString &title, const QString &body, bool ring,
                           const QString &conversationKey = {});
     [[nodiscard]] bool conversationMuted(bool isGroup, const QString &key) const;
+    void syncVideoSurfaces();
+    void resendVideoWindow(const QString &surface);
+    void clearRemoteMedia();
+    [[nodiscard]] static bool videoOverlaySupported();
+    [[nodiscard]] static QString mediaErrorText(const QString &code, const QString &fallback);
+
+    struct VideoSurfaceState {
+        QPointer<QQuickItem> item;
+        QPointer<QQuickWindow> window;
+    };
+    QMap<QString, VideoSurfaceState> m_videoSurfaces;
 
     QVariantList m_contacts;
     QVariantList m_directContacts;
@@ -260,6 +285,10 @@ private:
     bool m_microphoneEnabled = false;
     bool m_cameraEnabled = false;
     bool m_sharingScreen = false;
+    bool m_remoteCamera = false;
+    bool m_remoteScreen = false;
+    bool m_hasCamera = false;
+    QTimer *m_videoSyncTimer = nullptr;
     bool m_manualVideoQuality = false;
     int m_videoWidth = 1280;
     int m_videoHeight = 720;
